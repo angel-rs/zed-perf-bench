@@ -120,7 +120,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 names = [f"{o.pid}:{o.name}({o.tag})" for o in outcome.orphans]
                 print(f"    reaped orphans: {names}")
 
-        result = build_scenario_result(scenario, args.label, binary, version, outcomes)
+        result = build_scenario_result(scenario, args.label, binary, version, outcomes, args.fixtures_dir)
         out_path = results_dir / f"{scenario.name}.json"
         write_scenario_result(out_path, result)
         print(f"  wrote {out_path}")

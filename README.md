@@ -33,6 +33,23 @@ python3 -m venv .venv
 `--zed` accepts either a `.app` bundle (macOS — resolved to
 `Contents/MacOS/zed`) or a direct path to the `zed` binary.
 
+### Using existing local checkouts
+
+If you already have local clones of `zed` and/or `vscode`, point
+`fetch.sh` at them instead of cloning a second copy:
+
+```sh
+./fixtures/fetch.sh --link-zed ~/Development/zed
+./fixtures/fetch.sh --link-vscode ~/Development/vscode
+```
+
+This symlinks the fixture in place — zero new downloads — and each
+`zpb run` records that checkout's commit and dirty state in the result
+JSON (`fixture_git_sha` / `fixture_dirty`), so a baseline run against a
+local fixture stays auditable. See [BASELINE.md](BASELINE.md) for
+exactly what a baseline run does, phase by phase, and
+[fixtures/README.md](fixtures/README.md) for fixture details.
+
 ## Methodology
 
 This harness's measurement conventions are not invented from scratch — they
@@ -139,10 +156,13 @@ survive a `zpb run` invocation.
 to `results/<UTC-timestamp>-<label>/<scenario>.json`, containing every
 raw sample, per-run computed metrics, the aggregate across runs, and host
 info (platform, physical RAM, macOS version, footprint source, Zed
-version via `<binary> --version`). Every result also carries a
-`harness_version` (currently `0.2.0`) — `zpb compare` warns if the two
-sides of a comparison were produced by different harness versions, since
-their metric shapes or methodology may not line up.
+version via `<binary> --version`), plus `fixture_git_sha` / `fixture_dirty`
+for the scenario's project fixture when it's a git repo (null for
+non-project scenarios or non-git fixtures like `large/100mb.log`) — see
+BASELINE.md for why. Every result also carries a `harness_version`
+(currently `0.2.1`) — `zpb compare` warns if the two sides of a
+comparison were produced by different harness versions, since their
+metric shapes or methodology may not line up.
 
 ## Adding a scenario
 

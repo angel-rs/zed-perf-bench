@@ -13,6 +13,7 @@ import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -54,6 +55,13 @@ class Scenario:
     def resolve_project_path(self, fixtures_dir: Path) -> Path | None:
         if not self.project_path:
             return None
+        # Absolute paths and `~` (e.g. a linked local checkout outside
+        # fixtures/, or one the user keeps elsewhere entirely) are used
+        # as-is; anything else is resolved relative to fixtures_dir,
+        # unchanged from prior behavior.
+        expanded = Path(self.project_path).expanduser()
+        if expanded.is_absolute():
+            return expanded
         return fixtures_dir / self.project_path
 
 
@@ -131,6 +139,59 @@ def get_zed_version(binary: Path) -> str:
         return f"unknown ({exc})"
 
     return "unknown"
+
+
+def git_fixture_provenance(project_path: Path | None) -> dict[str, Any]:
+    """Best-effort git provenance for a scenario's resolved project path.
+
+    A locally-linked fixture (see fixtures/fetch.sh --link-zed) is not
+    pinned to a known SHA the way a fresh clone_pinned checkout is, so a
+    run against one needs its own record of what was actually opened:
+    the commit it was on and whether the working tree was dirty. This
+    keeps local-fixture runs auditable/comparable, same spirit as pinned
+    fixtures — see fixtures/README.md "Why pinned SHAs".
+
+    Graceful failure, not an error: a project_path of None (no project,
+    e.g. 01-cold-start-empty), a plain directory that isn't a git repo
+    (e.g. large/100mb.log), or a git binary/call failure all resolve to
+    {"fixture_git_sha": None, "fixture_dirty": None} rather than raising.
+    """
+    result: dict[str, Any] = {"fixture_git_sha": None, "fixture_dirty": None}
+    if project_path is None:
+        return result
+    # Require project_path to have its own .git entry (a dir for a normal
+    # clone or a symlinked checkout, a file for a worktree) before
+    # shelling out. Without this check, `git -C <path> ...` on a
+    # project_path that is merely nested inside *some* git repo (e.g.
+    # fixtures/large sitting inside this harness's own checkout) walks
+    # up and silently reports that unrelated repo's provenance instead
+    # of correctly reporting "not a git repo".
+    if not (project_path / ".git").exists():
+        return result
+    try:
+        sha_proc = subprocess.run(
+            ["git", "-C", str(project_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if sha_proc.returncode != 0:
+            return result
+        result["fixture_git_sha"] = sha_proc.stdout.strip()
+
+        status_proc = subprocess.run(
+            ["git", "-C", str(project_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if status_proc.returncode == 0:
+            result["fixture_dirty"] = bool(status_proc.stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        return {"fixture_git_sha": None, "fixture_dirty": None}
+    return result
 
 
 @dataclass

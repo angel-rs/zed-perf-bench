@@ -17,7 +17,7 @@ import psutil
 
 from zpb import harness_version
 from zpb.sampler import Sample, footprint_available
-from zpb.scenario import Orphan, PhaseBoundaries, RunOutcome, Scenario
+from zpb.scenario import Orphan, PhaseBoundaries, RunOutcome, Scenario, git_fixture_provenance
 
 BYTES_PER_MB = 1024 * 1024
 NOISY_THRESHOLD = 0.10
@@ -240,9 +240,15 @@ def build_scenario_result(
     zed_binary: Path,
     zed_version: str,
     outcomes: list[RunOutcome],
+    fixtures_dir: Path,
 ) -> dict[str, Any]:
     runs = [run_outcome_to_dict(i, o) for i, o in enumerate(outcomes)]
     ok_metrics = [r["metrics"] for r in runs if r["ok"] and r["metrics"] is not None]
+    # Fixture provenance (fixture_git_sha / fixture_dirty): recorded so a
+    # run against a locally-linked checkout (fixtures/fetch.sh --link-zed)
+    # is as auditable as one against a pinned-SHA clone. See
+    # zpb.scenario.git_fixture_provenance for the graceful-failure cases.
+    provenance = git_fixture_provenance(scenario.resolve_project_path(fixtures_dir))
     return {
         "harness_version": harness_version,
         "scenario": scenario.name,
@@ -251,6 +257,8 @@ def build_scenario_result(
         "timestamp_utc": utc_iso_now(),
         "zed_binary": str(zed_binary),
         "zed_version": zed_version,
+        "fixture_git_sha": provenance["fixture_git_sha"],
+        "fixture_dirty": provenance["fixture_dirty"],
         "host": host_info(),
         "runs": runs,
         "aggregate": aggregate_metrics(ok_metrics),

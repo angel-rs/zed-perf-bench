@@ -11,6 +11,28 @@ run `fetch.sh` to populate this directory.
 This is idempotent: it skips anything that already exists, so re-running
 it after a partial failure is safe.
 
+## Using an existing local checkout instead
+
+If you already have a local clone of `zed` or `vscode` (e.g. the working
+copy you're benchmarking changes against), point `fetch.sh` at it instead
+of cloning a second copy:
+
+```sh
+./fetch.sh --link-zed /path/to/your/zed
+./fetch.sh --link-vscode /path/to/your/vscode
+```
+
+This symlinks `fixtures/zed` (or `fixtures/vscode`) to `<path>` — no
+network traffic, no second checkout on disk. The target must already be
+a git repository; it's used as-is, on whatever commit it's checked out
+to, not the pinned SHA below. `zpb run` records that commit's
+`fixture_git_sha` and whether the tree was dirty (`fixture_dirty`) in
+every result JSON, so a run against a linked fixture stays auditable.
+See `../BASELINE.md`. Both flags are idempotent the same way as a
+regular fetch: if `fixtures/zed` (or `vscode`) already exists — as a
+directory or a symlink — `fetch.sh` skips it with a message rather than
+overwriting it.
+
 ## What it fetches
 
 - `vscode/` — depth-1 clone of `microsoft/vscode` at a pinned commit SHA.
