@@ -1,0 +1,11 @@
+name = "05-idle-soak"
+description = "Empty editor left idle for a long soak window. No user interaction, no project. Used to detect slow RSS growth (leaks) over time."
+project_path = ""
+zed_args = []
+
+[env]
+
+[phases]
+settle_seconds = 60
+soak_seconds = 1800
+startup_timeout = 60

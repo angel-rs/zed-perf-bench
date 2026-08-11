@@ -1,0 +1,11 @@
+name = "01-cold-start-empty"
+description = "Launch Zed with no project open. Baseline startup time and idle RSS with no language servers involved."
+project_path = ""
+zed_args = []
+
+[env]
+
+[phases]
+settle_seconds = 60
+soak_seconds = 0
+startup_timeout = 60

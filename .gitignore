@@ -1,0 +1,10 @@
+results/
+
+fixtures/*
+!fixtures/fetch.sh
+!fixtures/README.md
+
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/

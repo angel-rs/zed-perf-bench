@@ -1,0 +1,11 @@
+name = "04-large-file"
+description = "Open a single generated 100MB log file. Measures RSS/CPU for large-buffer handling with no language server involved."
+project_path = "large/100mb.log"
+zed_args = []
+
+[env]
+
+[phases]
+settle_seconds = 45
+soak_seconds = 0
+startup_timeout = 90

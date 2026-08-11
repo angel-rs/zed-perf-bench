@@ -1,0 +1,11 @@
+name = "02-vscode-ts"
+description = "Open the microsoft/vscode source tree. Measures RSS/CPU while tsserver (typescript-language-server) loads and indexes a large real-world TS project."
+project_path = "vscode"
+zed_args = []
+
+[env]
+
+[phases]
+settle_seconds = 90
+soak_seconds = 0
+startup_timeout = 120
