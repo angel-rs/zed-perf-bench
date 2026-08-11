@@ -33,7 +33,7 @@ Each child PR will state "Part of this discussion" and link back here; this chec
 
 ## Evidence method
 
-I built [zed-perf-bench](https://github.com/angel-rs/zed-perf-bench) — an external harness that launches a given Zed binary against pinned fixture projects and samples the full process tree (editor + language servers, tagged) at 1 Hz across standard scenarios: cold start, TypeScript monorepo (tsserver), Zed's own repo (rust-analyzer), a 100 MB file, and a long idle soak with linear-regression growth detection. It reports median-of-N with noise flags and produces before/after comparison tables. Every child PR will carry one of those tables, plus host specs.
+I built [zed-perf-bench](https://github.com/angel-rs/zed-perf-bench) — an external harness that launches a given Zed binary against pinned fixture projects and samples the full process tree (editor + language servers, tagged) at 1 Hz across standard scenarios: cold start, TypeScript monorepo (tsserver), Zed's own repo (rust-analyzer), a 100 MB file, and a long idle soak with linear-regression growth detection. It reports median-of-N with noise flags and produces before/after comparison tables. Every child PR will carry one of those tables, plus host specs. Methodology follows Firefox AWSY and Chromium memory-infra conventions: `phys_footprint` as the primary memory metric on macOS when available, a settled/quiesced checkpoint distinct from the whole-window median, and median + coefficient-of-variation with explicit noise flags rather than a single point estimate.
 
 If the team finds the harness useful beyond these PRs (e.g., as a seed for perf CI), I'm glad to adapt it or donate it — separate conversation, not a condition of any of this.
 

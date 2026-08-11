@@ -19,6 +19,7 @@ import psutil
 from zpb.sampler import ProcessTreeSampler, Sample, classify_tag
 
 DEFAULT_SETTLE_SECONDS = 60
+DEFAULT_QUIESCE_SECONDS = 5
 DEFAULT_SOAK_SECONDS = 0
 DEFAULT_STARTUP_TIMEOUT = 120
 
@@ -35,6 +36,7 @@ TEARDOWN_SIGTERM_WAIT_SECONDS = 10
 @dataclass
 class Phases:
     settle_seconds: int = DEFAULT_SETTLE_SECONDS
+    quiesce_seconds: int = DEFAULT_QUIESCE_SECONDS
     soak_seconds: int = DEFAULT_SOAK_SECONDS
     startup_timeout: int = DEFAULT_STARTUP_TIMEOUT
 
@@ -62,6 +64,7 @@ def load_scenario(path: Path) -> Scenario:
     phases_data = data.get("phases", {})
     phases = Phases(
         settle_seconds=phases_data.get("settle_seconds", DEFAULT_SETTLE_SECONDS),
+        quiesce_seconds=phases_data.get("quiesce_seconds", DEFAULT_QUIESCE_SECONDS),
         soak_seconds=phases_data.get("soak_seconds", DEFAULT_SOAK_SECONDS),
         startup_timeout=phases_data.get("startup_timeout", DEFAULT_STARTUP_TIMEOUT),
     )
@@ -134,6 +137,7 @@ def get_zed_version(binary: Path) -> str:
 class PhaseBoundaries:
     startup_end_t: float
     settle_end_t: float
+    quiesce_end_t: float
     soak_end_t: float
 
 
@@ -205,12 +209,23 @@ class ScenarioRunner:
             time.sleep(scenario.phases.settle_seconds)
             settle_end_t = sampler.snapshot()[-1].t
 
+            # Quiesce checkpoint (AWSY-style "settled" measurement): a short
+            # window immediately after the settle window, whose median is
+            # recorded separately (rss_settled_mb / footprint_settled_mb in
+            # report.py) from the whole-settle-window median above. Always
+            # runs, independent of soak.
+            time.sleep(scenario.phases.quiesce_seconds)
+            quiesce_end_t = sampler.snapshot()[-1].t
+
             if scenario.phases.soak_seconds > 0:
                 time.sleep(scenario.phases.soak_seconds)
             soak_end_t = sampler.snapshot()[-1].t
 
             phases = PhaseBoundaries(
-                startup_end_t=startup_end_t, settle_end_t=settle_end_t, soak_end_t=soak_end_t
+                startup_end_t=startup_end_t,
+                settle_end_t=settle_end_t,
+                quiesce_end_t=quiesce_end_t,
+                soak_end_t=soak_end_t,
             )
             samples = sampler.snapshot()
             orphans = self._teardown(proc)

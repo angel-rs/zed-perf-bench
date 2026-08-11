@@ -35,14 +35,44 @@ python3 -m venv .venv
 
 ## Methodology
 
+This harness's measurement conventions are not invented from scratch — they
+follow the two reference implementations for this kind of work:
+[Firefox "Are We Slim Yet" (AWSY)](https://firefox-source-docs.mozilla.org/performance/memory/awsy.html)
+for the settled-measurement and median-of-N methodology, and
+[Chromium memory-infra](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/memory-infra/README.md)
+for per-process-plus-aggregate reporting. Where this harness diverges from
+either, it's called out explicitly below and in Limitations, the same way
+those projects name their own instrumentation gaps (Chromium's
+`heap-unclassified`) rather than imply false precision.
+
 **Sampling.** A background thread samples the Zed process and all of its
 recursive children at 1 Hz (configurable via `--sample-interval`) using
 `psutil`. Each sample records per-process RSS and CPU%, tagged by role:
 `zed` (the main process), `language-server` (matched against known LSP
 binary/module names — see `zpb/sampler.py`), or `child-other` for
-anything else. Tree RSS (the sum across all processes) is the primary
-metric; per-tag breakdowns are kept so you can tell "the editor got
+anything else. Tree RSS (the sum across all processes) is kept for
+continuity; per-tag breakdowns are kept so you can tell "the editor got
 heavier" from "rust-analyzer got heavier."
+
+**phys_footprint (primary metric on macOS, when available).** RSS is
+misleading on macOS: it double-counts pages shared between processes and
+doesn't reflect compressed memory, while Jetsam (the OS's memory-pressure
+killer) and Activity Monitor act on `phys_footprint` — the figure
+`task_info(TASK_VM_INFO)` exposes. `psutil` has no way to get it. This
+harness gets it by shelling out to `/usr/bin/footprint` (an OS-provided
+CLI, no install needed), which — verified empirically on macOS 26.5.2 /
+Darwin 25.5 — works unprivileged against a same-user process and returns
+clean JSON via `-j`. Two alternatives were tried and rejected: raw ctypes
+`task_info(TASK_VM_INFO)` needs `task_for_pid` entitlements this harness
+doesn't have and fails against any process other than itself; `top -pid`
+reports a resident-size-derived "MEM" figure, not `phys_footprint`, so it
+doesn't solve the double-counting problem it's meant to fix. When
+`footprint` is available, every RSS-based metric below gets a
+`footprint_*` counterpart (`footprint_settle_mb`, `footprint_peak_mb`,
+etc.) computed the same way, over `phys_footprint` instead of RSS. When
+it isn't (non-macOS, or `/usr/bin/footprint` missing), those keys are
+simply absent from the result and RSS remains the only signal — see
+Limitations.
 
 **Startup heuristic.** There is no window-paint or "workspace ready"
 instrumentation in v0. Instead, a run is considered "started" once the
@@ -54,21 +84,36 @@ possible) would be misread as "settled." Treat `startup_seconds` as
 directionally useful, not as a precise TTI number.
 
 **Settle window.** After startup is detected, the harness waits
-`settle_seconds` (per-scenario, default 60) and takes `rss_settle_mb` as
-the **median** RSS over that window (median, not mean, so a single GC
-spike or LSP restart doesn't skew the number) and `cpu_avg_settle_pct` as
-the mean CPU% over the same window.
+`settle_seconds` (per-scenario, default 60) and takes `rss_settle_mb` /
+`footprint_settle_mb` as the **median** over that whole window (median,
+not mean, so a single GC spike or LSP restart doesn't skew the number)
+and `cpu_avg_settle_pct` as the mean CPU% over the same window.
+
+**Quiesce checkpoint.** Immediately after the settle window, the harness
+waits a further `quiesce_seconds` (default 5, configurable per-scenario)
+and records `rss_settled_mb` / `footprint_settled_mb` as the median over
+*that* short window only — an AWSY-style "settled" measurement, deliberately
+distinct from the whole-settle-window median above. The two can and do
+diverge (e.g. if the settle window still contains some tail-end LSP
+indexing); keeping both lets a reviewer see whether "settle" actually
+converged to something stable or is still trending at the point the
+harness declares it done.
 
 **Soak window (optional).** If `soak_seconds > 0`, the harness keeps
-sampling for that long afterward and fits a linear regression of RSS
-(MB) against elapsed time (minutes) — the slope is `rss_growth_mb_per_min`,
-a leak signal. `rss_soak_end_mb` is the median of the last few soak
-samples. `05-idle-soak.toml` is the scenario built for this.
+sampling after the quiesce window and fits a linear regression against
+elapsed time (minutes) — the slope is `rss_growth_mb_per_min` /
+`footprint_growth_mb_per_min`, a leak signal. `rss_soak_end_mb` /
+`footprint_soak_end_mb` is the median of the last few soak samples.
+`05-idle-soak.toml` is the scenario built for this.
 
-**Median-of-N.** `--runs` (default 3) repeats a scenario end-to-end and
-aggregates: each metric gets a `median`, a `stdev`, and a `noisy` flag
-(set when `stdev / median > 0.10`). Compare on the median; distrust a
-metric flagged `noisy` until you've re-run it with more reps.
+**Median-of-N, with CV.** `--runs` (default 3) repeats a scenario
+end-to-end and aggregates: each metric gets a `median`, a `stdev`, a `cv`
+(coefficient of variation, `stdev / median`), and a `noisy` flag (set when
+`cv > 0.10`) — the Perfherder/Pinpoint convention of reporting enough for
+a reviewer to judge signal vs. noise, not just a point estimate. Compare
+on the median; distrust a metric flagged `noisy` until you've re-run it
+with more reps. `zpb compare` prints N and CV for both sides of every row
+so this judgment call doesn't require opening the raw JSON.
 
 **Config isolation.** Zed's documented `--user-data-dir <DIR>` flag ("use
 a custom directory for all user data: database, extensions, logs";
@@ -93,8 +138,11 @@ survive a `zpb run` invocation.
 **Results.** Each `zpb run` invocation writes one JSON file per scenario
 to `results/<UTC-timestamp>-<label>/<scenario>.json`, containing every
 raw sample, per-run computed metrics, the aggregate across runs, and host
-info (platform, physical RAM, macOS version, Zed version via
-`<binary> --version`).
+info (platform, physical RAM, macOS version, footprint source, Zed
+version via `<binary> --version`). Every result also carries a
+`harness_version` (currently `0.2.0`) — `zpb compare` warns if the two
+sides of a comparison were produced by different harness versions, since
+their metric shapes or methodology may not line up.
 
 ## Adding a scenario
 
@@ -111,6 +159,7 @@ zed_args = []                        # extra CLI args passed to zed
 
 [phases]
 settle_seconds = 60
+quiesce_seconds = 5
 soak_seconds = 0
 startup_timeout = 120
 ```
@@ -119,8 +168,27 @@ All fields under `[phases]` are optional and default to the values shown
 above. If the scenario opens a real project, add it to `fixtures/fetch.sh`
 (pinned SHA, idempotent) and document it in `fixtures/README.md`.
 
-## Limitations (v0)
+## Limitations
 
+Named explicitly rather than left implicit — Firefox and Chromium name
+their own instrumentation gaps (e.g. `heap-unclassified`) instead of
+implying false precision, and this harness does the same:
+
+- **No USS/PSS.** `psutil` cannot report unique or proportional set size
+  on macOS, only RSS (and, when available, `phys_footprint`). RSS
+  double-counts pages shared between the editor and its language servers
+  — a real confound for a multi-process tree like this one.
+- **No allocator-level or per-subsystem breakdown.** This harness sees
+  whole-process totals only; it cannot attribute growth to a specific Zed
+  subsystem, buffer, or heap category the way an in-process allocator
+  hook could.
+- **RSS is not Jetsam-equivalent.** macOS's memory-pressure killer and
+  Activity Monitor act on `phys_footprint`, not RSS (see Methodology
+  above for why and how this harness gets it). On a host where
+  `/usr/bin/footprint` is unavailable, every `footprint_*` metric is
+  simply absent from the result and RSS is the only signal — check
+  `host.footprint_source` in the result JSON to see which applied to a
+  given run.
 - **No synthetic keystrokes.** These scenarios measure load/idle/soak
   behavior, not typing/scrolling/editing under load. A CPU or memory
   regression that only shows up while actively editing won't appear here.
@@ -135,10 +203,19 @@ above. If the scenario opens a real project, add it to `fixtures/fetch.sh`
 - **Startup heuristic, not ground truth** (see Methodology above).
 - **Settings aren't isolated** — only the data directory is (see Methodology).
 
+`zpb compare` auto-appends a Limitations section to its markdown output
+so a reviewer sees these caveats next to the numbers, not just here.
+
 ## Roadmap
 
 - v1: scripted interactions (typing, scrolling, multi-file switching) via
   Zed's CLI/scripting surface, once available.
+- v1: allocator-stats hooks (mimalloc) for a per-subsystem breakdown, if
+  Zed's allocator exposes one — narrows the "no allocator-level breakdown"
+  gap above.
+- Change-point detection once enough history exists to make it worthwhile
+  (e.g. [Apache Otava](https://otava.apache.org/)), instead of eyeballing
+  before/after tables by hand.
 - CI integration: run a fixed scenario subset on every PR to a Zed fork
   and fail on a memory regression threshold.
 - Cross-editor comparison: same scenarios against VS Code / other editors,

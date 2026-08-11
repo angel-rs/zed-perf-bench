@@ -55,7 +55,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         soak = f", soak={scenario.phases.soak_seconds}s" if scenario.phases.soak_seconds else ""
         print(f"{scenario.name}")
         print(f"    {scenario.description}")
-        print(f"    settle={scenario.phases.settle_seconds}s{soak}, "
+        print(f"    settle={scenario.phases.settle_seconds}s, "
+              f"quiesce={scenario.phases.quiesce_seconds}s{soak}, "
               f"startup_timeout={scenario.phases.startup_timeout}s")
     return 0
 
@@ -75,13 +76,16 @@ def _print_run_summary(result: dict) -> None:
     if not aggregate:
         print("    all runs failed, no aggregate metrics")
         return
-    for metric in ("startup_seconds", "rss_settle_mb", "rss_peak_mb", "cpu_avg_settle_pct",
-                   "rss_soak_end_mb", "rss_growth_mb_per_min"):
+    for metric in ("startup_seconds", "rss_settle_mb", "rss_settled_mb", "rss_peak_mb",
+                   "footprint_settle_mb", "footprint_settled_mb", "footprint_peak_mb",
+                   "cpu_avg_settle_pct", "rss_soak_end_mb", "footprint_soak_end_mb",
+                   "rss_growth_mb_per_min", "footprint_growth_mb_per_min"):
         if metric not in aggregate:
             continue
         stats = aggregate[metric]
+        cv_str = f"{stats['cv']:.3f}" if stats["cv"] is not None else "n/a"
         flag = " [noisy]" if stats["noisy"] else ""
-        print(f"    {metric}: median={stats['median']:.2f} stdev={stats['stdev']:.2f}{flag}")
+        print(f"    {metric}: median={stats['median']:.2f} n={stats['n']} cv={cv_str}{flag}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:

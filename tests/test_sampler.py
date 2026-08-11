@@ -9,7 +9,7 @@ import subprocess
 import time
 import unittest
 
-from zpb.sampler import TAG_ZED, ProcessTreeSampler
+from zpb.sampler import TAG_ZED, ProcessTreeSampler, footprint_available
 
 
 class TestProcessTreeSampler(unittest.TestCase):
@@ -33,6 +33,26 @@ class TestProcessTreeSampler(unittest.TestCase):
             # Elapsed time (`t`) should be monotonically non-decreasing.
             ts = [s.t for s in samples]
             self.assertEqual(ts, sorted(ts))
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+
+    @unittest.skipUnless(footprint_available(), "/usr/bin/footprint unavailable on this host")
+    def test_footprint_bytes_populated_when_available(self) -> None:
+        proc = subprocess.Popen(["sleep", "5"])
+        try:
+            sampler = ProcessTreeSampler(proc.pid, interval=0.5)
+            sampler.start()
+            time.sleep(1.5)
+            sampler.stop()
+
+            sample = sampler.snapshot()[-1]
+            self.assertIsNotNone(sample.tree_footprint_bytes)
+            self.assertGreater(sample.tree_footprint_bytes, 0)
+            self.assertEqual(len(sample.processes), 1)
+            self.assertIsNotNone(sample.processes[0].footprint_bytes)
+            self.assertGreater(sample.processes[0].footprint_bytes, 0)
         finally:
             if proc.poll() is None:
                 proc.terminate()
