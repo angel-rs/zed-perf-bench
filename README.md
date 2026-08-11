@@ -52,6 +52,11 @@ exactly what a baseline run does, phase by phase, and
 
 ## Methodology
 
+The full design justification — a comparison matrix of the five industry
+approaches to memory measurement (Apple, Microsoft, Google/Chromium, Mozilla)
+and why this harness sits where it does, with annotated bibliography — lives
+in [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
+
 This harness's measurement conventions are not invented from scratch — they
 follow the two reference implementations for this kind of work:
 [Firefox "Are We Slim Yet" (AWSY)](https://firefox-source-docs.mozilla.org/performance/memory/awsy.html)
