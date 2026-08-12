@@ -1,0 +1,266 @@
+name: bench
+
+# Cloud A/B benchmark runs on GitHub-hosted macOS arm64 runners, so a run
+# doesn't have to happen on someone's laptop. Manual dispatch only — this
+# is not wired to push/PR triggers.
+#
+# BILLING AWARENESS: this repo is private, and private-repo macOS runner
+# minutes bill at a 10x multiplier against the included Actions minutes
+# (see README "Running in CI"). Kept deliberately lean: one job, no
+# matrix, workflow_dispatch only (never on push/PR), and a hard
+# timeout-minutes cap so a hung Zed process can't run the clock out.
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: >-
+          Space- or comma-separated scenario names to run, e.g.
+          "01-cold-start-empty" or "01-cold-start-empty 04-large-file".
+        type: string
+        default: "01-cold-start-empty"
+      runs:
+        description: "Repetitions per scenario (zpb run --runs)"
+        type: string
+        default: "2"
+      soak_seconds:
+        description: >-
+          --soak-override value: overrides soak_seconds for any selected
+          scenario that already has soak>0 (currently only
+          05-idle-soak). No effect if 05-idle-soak isn't in `scenarios`.
+        type: string
+        default: "600"
+      channel_a:
+        description: "Zed channel for the first (or only) run"
+        type: string
+        default: "stable"
+      channel_b:
+        description: >-
+          Zed channel for the second run, compared against channel_a.
+          Empty = single-channel run, no compare. Only "preview" is
+          wired to a brew cask today besides empty.
+        type: string
+        default: ""
+
+# No process may outlive the job; a runaway Zed process eating the clock
+# is exactly the failure mode a hard cap protects against on a
+# per-minute-billed private-repo runner.
+jobs:
+  bench:
+    runs-on: macos-14 # arm64
+    timeout-minutes: 45
+    env:
+      # Marks every result JSON produced by this job as CI-origin (see
+      # zpb/report.py host_info) so it's never silently compared against
+      # a lab/laptop result as if the two were equivalent.
+      ZPB_CI: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install zpb
+        run: pip install -e .
+
+      - name: Select scenarios
+        id: select_scenarios
+        env:
+          SCENARIOS_INPUT: ${{ inputs.scenarios }}
+        run: |
+          set -euo pipefail
+          rm -rf ci-scenarios
+          mkdir -p ci-scenarios
+          IFS=', ' read -r -a SCEN_LIST <<< "$SCENARIOS_INPUT"
+          if [ "${#SCEN_LIST[@]}" -eq 0 ]; then
+            echo "::error::scenarios input resolved to an empty list"
+            exit 1
+          fi
+          for name in "${SCEN_LIST[@]}"; do
+            [ -z "$name" ] && continue
+            src="scenarios/${name}.toml"
+            if [ ! -f "$src" ]; then
+              echo "::error::no such scenario TOML: $src"
+              exit 1
+            fi
+            cp "$src" ci-scenarios/
+          done
+          echo "==> selected scenarios:"
+          ls ci-scenarios
+
+      - name: Install Zed (stable)
+        run: brew install --cask zed
+
+      - name: Install Zed (preview)
+        if: inputs.channel_b == 'preview'
+        run: brew install --cask zed@preview
+
+      - name: Resolve Zed app paths
+        id: resolve_apps
+        env:
+          CHANNEL_B: ${{ inputs.channel_b }}
+        run: |
+          set -euo pipefail
+          ZED_A_APP=$(find /Applications -maxdepth 1 -iname "Zed.app" | head -n1)
+          if [ -z "$ZED_A_APP" ]; then
+            echo "::error::Zed.app not found under /Applications after brew install --cask zed"
+            ls /Applications
+            exit 1
+          fi
+          echo "zed_a_app=$ZED_A_APP" >> "$GITHUB_OUTPUT"
+          echo "==> channel_a app: $ZED_A_APP"
+
+          if [ "$CHANNEL_B" = "preview" ]; then
+            ZED_B_APP=$(find /Applications -maxdepth 1 -iname "*Preview*.app" | head -n1)
+            if [ -z "$ZED_B_APP" ]; then
+              echo "::error::no *Preview*.app found under /Applications after brew install --cask zed@preview"
+              ls /Applications
+              exit 1
+            fi
+            echo "zed_b_app=$ZED_B_APP" >> "$GITHUB_OUTPUT"
+            echo "==> channel_b app: $ZED_B_APP"
+          fi
+
+      - name: Prepare fixtures
+        env:
+          SCENARIOS_INPUT: ${{ inputs.scenarios }}
+        run: |
+          set -euo pipefail
+          # Deliberately narrow: only the two fixtures a scenario in this
+          # harness can need without a huge clone. 01/05 need nothing;
+          # 02-vscode-ts is out of scope for CI (no cheap shallow-fixture
+          # path documented for it) and is left unfetched on purpose.
+          if grep -qw '03-zed-rust' <<< "$SCENARIOS_INPUT"; then
+            ZED_SHA=$(grep -E '^ZED_SHA=' fixtures/fetch.sh | cut -d'"' -f2)
+            echo "==> shallow-cloning zed-industries/zed @ $ZED_SHA into fixtures/zed"
+            rm -rf fixtures/zed
+            mkdir -p fixtures/zed
+            (
+              cd fixtures/zed
+              git init -q
+              git remote add origin https://github.com/zed-industries/zed.git
+              git fetch --depth 1 origin "$ZED_SHA"
+              git checkout -q FETCH_HEAD
+            )
+          fi
+
+          if grep -qw '04-large-file' <<< "$SCENARIOS_INPUT"; then
+            echo "==> generating fixtures/large/100mb.log"
+            mkdir -p fixtures/large
+            # Same shape as fixtures/fetch.sh's generator (~140 bytes/line,
+            # ~750k lines ~= 100MB), as a single awk one-liner instead of a
+            # Python heredoc so it survives being embedded in a YAML block
+            # scalar without an indentation trap.
+            LOG_LINE='2026-08-11T06:00:00.000Z INFO  [worker-07] request_id=a1b2c3d4 handled GET /api/v1/status in 12ms status=200 bytes=482'
+            awk -v line="$LOG_LINE" 'BEGIN { for (i = 0; i < 750000; i++) print line " seq=" i }' > fixtures/large/100mb.log
+          fi
+
+      - name: Run benchmark - channel A (${{ inputs.channel_a }})
+        id: run_a
+        if: always() && steps.resolve_apps.outputs.zed_a_app != ''
+        env:
+          ZED_A_APP: ${{ steps.resolve_apps.outputs.zed_a_app }}
+          CHANNEL_A: ${{ inputs.channel_a }}
+          RUNS: ${{ inputs.runs }}
+          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+        run: |
+          set +e
+          LABEL="ci-${CHANNEL_A}-${GITHUB_SHA:0:7}"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          zpb run --zed "$ZED_A_APP" --label "$LABEL" --all \
+            --scenarios-dir ci-scenarios --runs "$RUNS" --soak-override "$SOAK_SECONDS"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          RESULTS_DIR=$(ls -d results/*-"$LABEL" 2>/dev/null | head -n1)
+          echo "results_dir=${RESULTS_DIR:-}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Run benchmark - channel B (${{ inputs.channel_b }})
+        id: run_b
+        if: always() && inputs.channel_b != '' && steps.resolve_apps.outputs.zed_b_app != ''
+        env:
+          ZED_B_APP: ${{ steps.resolve_apps.outputs.zed_b_app }}
+          CHANNEL_B: ${{ inputs.channel_b }}
+          RUNS: ${{ inputs.runs }}
+          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+        run: |
+          set +e
+          LABEL="ci-${CHANNEL_B}-${GITHUB_SHA:0:7}"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          zpb run --zed "$ZED_B_APP" --label "$LABEL" --all \
+            --scenarios-dir ci-scenarios --runs "$RUNS" --soak-override "$SOAK_SECONDS"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          RESULTS_DIR=$(ls -d results/*-"$LABEL" 2>/dev/null | head -n1)
+          echo "results_dir=${RESULTS_DIR:-}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Compare channel A vs channel B
+        id: compare
+        if: always() && inputs.channel_b != ''
+        env:
+          RESULTS_A: ${{ steps.run_a.outputs.results_dir }}
+          RESULTS_B: ${{ steps.run_b.outputs.results_dir }}
+        run: |
+          set +e
+          mkdir -p ci-artifact
+          if [ -n "$RESULTS_A" ] && [ -d "$RESULTS_A" ] && [ -n "$RESULTS_B" ] && [ -d "$RESULTS_B" ]; then
+            zpb compare "$RESULTS_A" "$RESULTS_B" --out ci-artifact/compare.md
+          else
+            echo "Skipping compare: results missing (A='$RESULTS_A' B='$RESULTS_B')" \
+              | tee ci-artifact/compare-skipped.txt
+          fi
+          exit 0
+
+      - name: Collect host info
+        if: always()
+        run: |
+          mkdir -p ci-artifact
+          {
+            echo "=== sysctl -n machdep.cpu.brand_string ==="
+            sysctl -n machdep.cpu.brand_string || true
+            echo
+            echo "=== sw_vers ==="
+            sw_vers || true
+            echo
+            echo "=== memory (hw.memsize, bytes) ==="
+            sysctl -n hw.memsize || true
+            echo
+            echo "=== vm_stat ==="
+            vm_stat || true
+          } > ci-artifact/host-info.txt
+
+      - name: Collect Zed.log
+        if: always()
+        run: |
+          mkdir -p ci-artifact
+          LOG="$HOME/Library/Logs/Zed/Zed.log"
+          if [ -f "$LOG" ]; then
+            cp "$LOG" ci-artifact/Zed.log
+          else
+            echo "no $LOG on this runner" > ci-artifact/Zed.log.missing
+          fi
+
+      - name: Assemble results into artifact
+        if: always()
+        env:
+          RESULTS_A: ${{ steps.run_a.outputs.results_dir }}
+          RESULTS_B: ${{ steps.run_b.outputs.results_dir }}
+        run: |
+          mkdir -p ci-artifact/results
+          [ -n "$RESULTS_A" ] && [ -d "$RESULTS_A" ] && cp -r "$RESULTS_A" ci-artifact/results/ || true
+          [ -n "$RESULTS_B" ] && [ -d "$RESULTS_B" ] && cp -r "$RESULTS_B" ci-artifact/results/ || true
+          {
+            echo "channel_a=${{ inputs.channel_a }} exit_code=${{ steps.run_a.outputs.exit_code }} results_dir=$RESULTS_A"
+            echo "channel_b=${{ inputs.channel_b }} exit_code=${{ steps.run_b.outputs.exit_code }} results_dir=$RESULTS_B"
+          } > ci-artifact/run-summary.txt
+          cat ci-artifact/run-summary.txt
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: ci-artifact/
+          if-no-files-found: warn
+          retention-days: 14

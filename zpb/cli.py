@@ -29,6 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--fixtures-dir", type=Path, default=Path("fixtures"))
     p_run.add_argument("--results-dir", type=Path, default=Path("results"))
     p_run.add_argument("--sample-interval", type=float, default=1.0, help="Sampler interval in seconds")
+    p_run.add_argument(
+        "--soak-override",
+        type=int,
+        default=None,
+        help="Override soak_seconds for any scenario whose TOML already has soak>0 "
+        "(e.g. shortening 05-idle-soak's 1800s for a time-boxed CI run). "
+        "No effect on scenarios with soak_seconds=0.",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_compare = sub.add_parser("compare", help="Compare two results directories")
@@ -101,6 +109,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
     else:
         scenarios = [_resolve_scenario(args.scenario, args.scenarios_dir)]
+
+    if args.soak_override is not None:
+        for scenario in scenarios:
+            if scenario.phases.soak_seconds > 0:
+                scenario.phases.soak_seconds = args.soak_override
 
     runner = ScenarioRunner(binary, args.fixtures_dir, sample_interval=args.sample_interval)
     results_dir = args.results_dir / f"{utc_timestamp()}-{args.label}"

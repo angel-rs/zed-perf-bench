@@ -50,6 +50,82 @@ local fixture stays auditable. See [BASELINE.md](BASELINE.md) for
 exactly what a baseline run does, phase by phase, and
 [fixtures/README.md](fixtures/README.md) for fixture details.
 
+## Running in CI (GitHub Actions)
+
+`.github/workflows/bench.yml` runs the harness on a GitHub-hosted macOS
+arm64 runner (`macos-14`) instead of a laptop — useful for a run you want
+kicked off from anywhere, or one you don't want tying up your own
+machine. It's `workflow_dispatch`-only (never on push/PR).
+
+Dispatch it with the `gh` CLI:
+
+```sh
+gh workflow run bench.yml \
+  -f scenarios="01-cold-start-empty" \
+  -f runs="2" \
+  -f soak_seconds="600" \
+  -f channel_a="stable" \
+  -f channel_b=""
+```
+
+- `scenarios` — space- or comma-separated scenario names (default
+  `01-cold-start-empty`). `03-zed-rust` triggers a pinned shallow clone
+  of `zed-industries/zed` into `fixtures/zed`; `04-large-file` triggers
+  local generation of `fixtures/large/100mb.log`. `02-vscode-ts` is not
+  wired up in CI (no cheap fixture path for it yet).
+- `runs` — reps per scenario, passed straight to `zpb run --runs`.
+- `soak_seconds` — passed as `--soak-override` (see below); only takes
+  effect if a selected scenario already has `soak_seconds > 0` (today,
+  only `05-idle-soak`, whose TOML default is 1800s).
+- `channel_a` / `channel_b` — Zed channels to benchmark. `channel_b`
+  empty (the default) means a single-channel run with no compare;
+  `channel_b="preview"` installs `zed@preview` alongside `zed` (stable)
+  and runs both, followed by `zpb compare`.
+
+Watch it and pull the results down once it's done:
+
+```sh
+gh run watch                     # or: gh run list --workflow=bench.yml
+gh run download <run-id>         # artifact: bench-results-<run-id>/
+```
+
+The artifact contains the raw `results/` JSON, a `compare.md` if both
+channels ran, `host-info.txt` (CPU model, macOS version, memory), and
+`Zed.log` if Zed produced one — captured with `if: always()` so a run
+where Zed fails to launch or render still leaves behind whatever
+diagnostic data exists, which is itself the useful signal for judging
+whether this runner class is viable at all.
+
+**The noise caveat.** A GitHub-hosted runner is a shared VM, not
+dedicated hardware — background noise and scheduling jitter are higher
+and less predictable than on a machine sitting on your desk. Every
+result produced by this workflow is tagged `host.ci: true` (via the
+`ZPB_CI=1` env var the workflow sets), and `zpb compare` refuses to let
+that pass silently: comparing a `ci: true` result against a `ci: false`
+one prints a warning banner, the same pattern used for a
+`harness_version` mismatch. Treat CI runs as good for **relative** A/B
+comparisons *within the same workflow run* (same runner class, same
+`--runs`, CV disclosed in every row) — not as a source of **absolute**
+numbers to cite in an upstream PR. For that, use a dedicated machine
+per BASELINE.md's run-conditions checklist.
+
+**Billing.** This repository is private, and GitHub bills private-repo
+macOS runner minutes at a **10x multiplier** against the plan's included
+minutes (a `macos-14` minute here costs 10 minutes of quota). The
+workflow is kept lean specifically because of this: one job, no matrix,
+manual dispatch only, `timeout-minutes: 45` as a hard ceiling. A public
+repo does not pay this multiplier — it gets free, effectively unlimited
+minutes on GitHub-hosted standard runners (macOS included) for public
+workflows.
+
+**`--soak-override <seconds>`.** `zpb run` accepts `--soak-override`,
+which overrides `soak_seconds` for any scenario whose TOML already sets
+`soak_seconds > 0` — a no-op for every other scenario. This exists so a
+long soak (e.g. `05-idle-soak`'s 1800s default) can be time-boxed for a
+CI run's `timeout-minutes` budget without hand-editing the scenario
+TOML; it works the same way outside CI, for the same reason (a quick
+local leak-signal check without waiting the full 30 minutes).
+
 ## Methodology
 
 The full design justification — a comparison matrix of the five industry

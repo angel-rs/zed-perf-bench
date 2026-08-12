@@ -6,6 +6,7 @@ All "*_mb" fields are mebibytes (bytes / 1024**2), not decimal megabytes.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import statistics
 from dataclasses import asdict
@@ -42,6 +43,11 @@ def host_info() -> dict[str, Any]:
         "footprint_source": (
             "phys_footprint (/usr/bin/footprint)" if footprint_available() else "unavailable (RSS only)"
         ),
+        # Set via ZPB_CI=1 in .github/workflows/bench.yml. Recorded so a
+        # shared-VM CI result is never silently conflated with a lab
+        # (dedicated-laptop) result — see the ci-vs-non-ci warning in
+        # render_compare_markdown below and README "Running in CI".
+        "ci": bool(os.environ.get("ZPB_CI")),
     }
     mac_ver = platform.mac_ver()[0]
     if mac_ver:
@@ -376,6 +382,19 @@ def render_compare_markdown(dir_a: Path, dir_b: Path, label_a: str, label_b: str
                 f"> **WARNING:** comparing `harness_version` {version_a} ({label_a}) against "
                 f"{version_b} ({label_b}) — metric shapes and methodology may differ between them; "
                 "treat this comparison as indicative only."
+            )
+            lines.append("")
+
+        ci_a = bool(result_a.get("host", {}).get("ci", False))
+        ci_b = bool(result_b.get("host", {}).get("ci", False))
+        if ci_a != ci_b:
+            ci_label = label_a if ci_a else label_b
+            lab_label = label_b if ci_a else label_a
+            lines.append(
+                f"> **WARNING:** comparing a CI result ({ci_label}, shared macOS runner) against "
+                f"a non-CI result ({lab_label}, lab/dedicated hardware) — a shared CI runner is "
+                "noisier and has different background load than dedicated hardware; treat this "
+                "comparison as indicative only, not evidence for an upstream PR."
             )
             lines.append("")
         lines.append(f"| metric | {label_a} | {label_b} | Δ | Δ% | N (a/b) | CV (a/b) |")
