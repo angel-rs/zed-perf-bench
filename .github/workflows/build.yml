@@ -1,0 +1,169 @@
+name: build
+
+# Builds a cargo package from source (Zed itself, by default) on a
+# GitHub-hosted macOS arm64 runner, packaging the resulting binary as an
+# artifact that bench.yml can pull in as a channel instead of a brew
+# install. Split out from bench.yml on purpose: a from-source Zed build
+# can run long and has a completely different failure mode (OOM'd
+# linker, not a flaky editor launch) than a benchmark run — isolating it
+# into its own job/workflow means neither one's timeout has to absorb
+# the other's worst case.
+#
+# BILLING AWARENESS: this repo is private, and private-repo macOS runner
+# minutes bill at a 10x multiplier against the included Actions minutes
+# (see README "Running in CI"). A full Zed release build is real cost —
+# dispatch deliberately, manual dispatch only, never on push/PR.
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "GitHub repo to build, as owner/name"
+        type: string
+        default: "zed-industries/zed"
+      ref:
+        description: "Branch or commit SHA to build"
+        type: string
+        required: true
+      label:
+        description: >-
+          Label for this build. Used in the artifact/build-log names
+          (zed-build-<label>, build-log-<label>) and as the channel
+          label bench.yml expects when consuming this artifact, e.g.
+          "upstream-main" or "pr1-candidate".
+        type: string
+        required: true
+      cargo_package:
+        description: "Cargo package to build (cargo build --package <this>)"
+        type: string
+        default: "zed"
+      binary_name:
+        description: >-
+          Binary produced by cargo_package, if it differs from the
+          package name (e.g. cargo_package=ripgrep produces binary rg).
+          Defaults to cargo_package when left blank.
+        type: string
+        default: ""
+
+# No process may outlive the job on a per-minute-billed runner.
+jobs:
+  build:
+    runs-on: macos-14 # arm64
+    timeout-minutes: 180
+    env:
+      # Memory-safe build env — on a 7GB runner the linker, not the
+      # compiler, is what OOMs. Set at job level (not just for the build
+      # step) and pinned explicitly rather than left to the target
+      # repo's own Cargo.toml defaults, so that two builds dispatched
+      # separately for an A/B comparison are ALWAYS built under the
+      # identical env — see README "Running in CI" fairness note.
+      CARGO_BUILD_JOBS: "3"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout zed-perf-bench
+        uses: actions/checkout@v4
+
+      - name: Log disk/mem at start
+        if: always()
+        run: |
+          mkdir -p build-artifact
+          {
+            echo "=== vm_stat ==="
+            vm_stat || true
+            echo
+            echo "=== df -h ==="
+            df -h || true
+          } > build-artifact/host-info.txt
+          cat build-artifact/host-info.txt
+
+      - name: Shallow clone ${{ inputs.repo }} @ ${{ inputs.ref }}
+        env:
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          echo "==> shallow-cloning $REPO @ $REF into zed-src/"
+          rm -rf zed-src
+          mkdir -p zed-src
+          (
+            cd zed-src
+            git init -q
+            git remote add origin "https://github.com/${REPO}.git"
+            git fetch --depth 1 origin "$REF"
+            git checkout -q FETCH_HEAD
+          )
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          cd zed-src
+          # rustup auto-selects zed-src/rust-toolchain.toml when present
+          # because every subsequent step also runs with zed-src as its
+          # cwd; this just logs what got picked.
+          rustup show
+
+      - name: Cache cargo registry/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: zed-src
+          prefix-key: zed-build
+
+      - name: Build (cargo build --release --package ${{ inputs.cargo_package }})
+        env:
+          CARGO_PACKAGE: ${{ inputs.cargo_package }}
+        run: |
+          set -o pipefail
+          cd zed-src
+          cargo build --release --package "$CARGO_PACKAGE" 2>&1 | tee ../build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ inputs.label }}
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Package
+        env:
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+          CARGO_PACKAGE: ${{ inputs.cargo_package }}
+          BINARY_NAME: ${{ inputs.binary_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifact
+          BINARY_NAME="${BINARY_NAME:-$CARGO_PACKAGE}"
+          BIN_PATH="zed-src/target/release/${BINARY_NAME}"
+          if [ ! -f "$BIN_PATH" ]; then
+            echo "::error::expected binary not found at $BIN_PATH (cargo_package=$CARGO_PACKAGE binary_name=$BINARY_NAME) — if the package's [[bin]] name differs from the package name, pass binary_name explicitly"
+            ls -la zed-src/target/release/ || true
+            exit 1
+          fi
+          cp "$BIN_PATH" build-artifact/
+          RESOLVED_SHA=$(git -C zed-src rev-parse HEAD)
+          {
+            echo "repo=$REPO"
+            echo "ref=$REF"
+            echo "resolved_sha=$RESOLVED_SHA"
+            echo "cargo_package=$CARGO_PACKAGE"
+            echo "binary_name=$BINARY_NAME"
+            echo "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"
+            echo "CARGO_PROFILE_RELEASE_DEBUG=$CARGO_PROFILE_RELEASE_DEBUG"
+            echo "CARGO_PROFILE_RELEASE_LTO=$CARGO_PROFILE_RELEASE_LTO"
+            echo "CARGO_INCREMENTAL=$CARGO_INCREMENTAL"
+            echo "rustc_version=$(rustc -V)"
+            echo "build_date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > build-artifact/build-info.txt
+          cat build-artifact/build-info.txt
+
+      - name: Upload build artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-build-${{ inputs.label }}
+          path: build-artifact/
+          if-no-files-found: warn
+          retention-days: 14

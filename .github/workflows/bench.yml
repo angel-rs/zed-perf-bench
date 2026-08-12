@@ -37,7 +37,41 @@ on:
         description: >-
           Zed channel for the second run, compared against channel_a.
           Empty = single-channel run, no compare. Only "preview" is
-          wired to a brew cask today besides empty.
+          wired to a brew cask today besides empty. Ignored for
+          resolving a binary when build_run_id_b is set (still used to
+          gate whether a B run happens at all if you don't want to set
+          it to a real channel name).
+        type: string
+        default: ""
+      build_run_id_a:
+        description: >-
+          Optional: run id of a build.yml dispatch whose zed-build-<label>
+          artifact should be used as channel A instead of installing from
+          brew. Requires build_label_a to also be set.
+        type: string
+        default: ""
+      build_run_id_b:
+        description: >-
+          Optional: run id of a build.yml dispatch whose zed-build-<label>
+          artifact should be used as channel B instead of installing from
+          brew. Requires build_label_b to also be set. Setting this alone
+          (with channel_b empty) is enough to trigger a B run.
+        type: string
+        default: ""
+      build_label_a:
+        description: >-
+          label used when dispatching build.yml for channel A — the
+          artifact is named zed-build-<this>. Required together with
+          build_run_id_a; also used in place of channel_a in the zpb
+          result label (ci-<build_label_a>-<sha>) when set.
+        type: string
+        default: ""
+      build_label_b:
+        description: >-
+          label used when dispatching build.yml for channel B — the
+          artifact is named zed-build-<this>. Required together with
+          build_run_id_b; also used in place of channel_b in the zpb
+          result label (ci-<build_label_b>-<sha>) when set.
         type: string
         default: ""
 
@@ -56,6 +90,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate build inputs
+        env:
+          BUILD_RUN_ID_A: ${{ inputs.build_run_id_a }}
+          BUILD_LABEL_A: ${{ inputs.build_label_a }}
+          BUILD_RUN_ID_B: ${{ inputs.build_run_id_b }}
+          BUILD_LABEL_B: ${{ inputs.build_label_b }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BUILD_RUN_ID_A" ] && [ -z "$BUILD_LABEL_A" ]; then
+            echo "::error::build_run_id_a is set but build_label_a is empty — both or neither"
+            exit 1
+          fi
+          if [ -z "$BUILD_RUN_ID_A" ] && [ -n "$BUILD_LABEL_A" ]; then
+            echo "::error::build_label_a is set but build_run_id_a is empty — both or neither"
+            exit 1
+          fi
+          if [ -n "$BUILD_RUN_ID_B" ] && [ -z "$BUILD_LABEL_B" ]; then
+            echo "::error::build_run_id_b is set but build_label_b is empty — both or neither"
+            exit 1
+          fi
+          if [ -z "$BUILD_RUN_ID_B" ] && [ -n "$BUILD_LABEL_B" ]; then
+            echo "::error::build_label_b is set but build_run_id_b is empty — both or neither"
+            exit 1
+          fi
+          echo "==> build input guard passed"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -91,36 +151,84 @@ jobs:
           ls ci-scenarios
 
       - name: Install Zed (stable)
+        if: inputs.build_run_id_a == ''
         run: brew install --cask zed
 
       - name: Install Zed (preview)
-        if: inputs.channel_b == 'preview'
+        if: inputs.channel_b == 'preview' && inputs.build_run_id_b == ''
         run: brew install --cask zed@preview
 
-      - name: Resolve Zed app paths
+      - name: Download build artifact A
+        if: inputs.build_run_id_a != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-build-${{ inputs.build_label_a }}
+          run-id: ${{ inputs.build_run_id_a }}
+          github-token: ${{ github.token }}
+          path: build-a
+
+      - name: Download build artifact B
+        if: inputs.build_run_id_b != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-build-${{ inputs.build_label_b }}
+          run-id: ${{ inputs.build_run_id_b }}
+          github-token: ${{ github.token }}
+          path: build-b
+
+      - name: Resolve Zed binaries
         id: resolve_apps
         env:
           CHANNEL_B: ${{ inputs.channel_b }}
+          BUILD_RUN_ID_A: ${{ inputs.build_run_id_a }}
+          BUILD_LABEL_A: ${{ inputs.build_label_a }}
+          BUILD_RUN_ID_B: ${{ inputs.build_run_id_b }}
+          BUILD_LABEL_B: ${{ inputs.build_label_b }}
         run: |
           set -euo pipefail
-          ZED_A_APP=$(find /Applications -maxdepth 1 -iname "Zed.app" | head -n1)
-          if [ -z "$ZED_A_APP" ]; then
-            echo "::error::Zed.app not found under /Applications after brew install --cask zed"
-            ls /Applications
-            exit 1
-          fi
-          echo "zed_a_app=$ZED_A_APP" >> "$GITHUB_OUTPUT"
-          echo "==> channel_a app: $ZED_A_APP"
 
-          if [ "$CHANNEL_B" = "preview" ]; then
-            ZED_B_APP=$(find /Applications -maxdepth 1 -iname "*Preview*.app" | head -n1)
-            if [ -z "$ZED_B_APP" ]; then
-              echo "::error::no *Preview*.app found under /Applications after brew install --cask zed@preview"
+          if [ -n "$BUILD_RUN_ID_A" ]; then
+            ZED_A_BIN=$(find build-a -maxdepth 1 -type f ! -name 'build-info.txt' | head -n1)
+            if [ -z "$ZED_A_BIN" ]; then
+              echo "::error::no binary found in build-a/ (artifact zed-build-${BUILD_LABEL_A})"
+              ls -la build-a || true
+              exit 1
+            fi
+            chmod +x "$ZED_A_BIN"
+            echo "zed_a_app=$ZED_A_BIN" >> "$GITHUB_OUTPUT"
+            echo "==> channel_a binary (build run ${BUILD_RUN_ID_A}, label ${BUILD_LABEL_A}): $ZED_A_BIN"
+          else
+            ZED_A_APP=$(find /Applications -maxdepth 1 -iname "Zed.app" | head -n1)
+            if [ -z "$ZED_A_APP" ]; then
+              echo "::error::Zed.app not found under /Applications after brew install --cask zed"
               ls /Applications
               exit 1
             fi
-            echo "zed_b_app=$ZED_B_APP" >> "$GITHUB_OUTPUT"
-            echo "==> channel_b app: $ZED_B_APP"
+            echo "zed_a_app=$ZED_A_APP" >> "$GITHUB_OUTPUT"
+            echo "==> channel_a app: $ZED_A_APP"
+          fi
+
+          if [ "$CHANNEL_B" = "preview" ] || [ -n "$BUILD_RUN_ID_B" ]; then
+            if [ -n "$BUILD_RUN_ID_B" ]; then
+              ZED_B_BIN=$(find build-b -maxdepth 1 -type f ! -name 'build-info.txt' | head -n1)
+              if [ -z "$ZED_B_BIN" ]; then
+                echo "::error::no binary found in build-b/ (artifact zed-build-${BUILD_LABEL_B})"
+                ls -la build-b || true
+                exit 1
+              fi
+              chmod +x "$ZED_B_BIN"
+              echo "zed_b_app=$ZED_B_BIN" >> "$GITHUB_OUTPUT"
+              echo "==> channel_b binary (build run ${BUILD_RUN_ID_B}, label ${BUILD_LABEL_B}): $ZED_B_BIN"
+            else
+              ZED_B_APP=$(find /Applications -maxdepth 1 -iname "*Preview*.app" | head -n1)
+              if [ -z "$ZED_B_APP" ]; then
+                echo "::error::no *Preview*.app found under /Applications after brew install --cask zed@preview"
+                ls /Applications
+                exit 1
+              fi
+              echo "zed_b_app=$ZED_B_APP" >> "$GITHUB_OUTPUT"
+              echo "==> channel_b app: $ZED_B_APP"
+            fi
           fi
 
       - name: Prepare fixtures
@@ -128,7 +236,7 @@ jobs:
           SCENARIOS_INPUT: ${{ inputs.scenarios }}
         run: |
           set -euo pipefail
-          # Deliberately narrow: only the two fixtures a scenario in this
+          # Deliberately narrow: only the fixtures a scenario in this
           # harness can need without a huge clone. 01/05 need nothing;
           # 02-vscode-ts is out of scope for CI (no cheap shallow-fixture
           # path documented for it) and is left unfetched on purpose.
@@ -146,6 +254,27 @@ jobs:
             )
           fi
 
+          if grep -qw '03b-ripgrep-rust' <<< "$SCENARIOS_INPUT"; then
+            # HEAD of BurntSushi/ripgrep's default branch on 2026-08-12
+            # (via `gh api repos/BurntSushi/ripgrep/commits/master --jq
+            # .sha`), pinned for the same reproducibility reason as
+            # fixtures/fetch.sh's ZED_SHA/VSCODE_SHA. rust-analyzer on
+            # ripgrep's workspace runs ~1-2GB, small enough to fit a 7GB
+            # macos-14 runner — 03-zed-rust's full zed-repo indexing
+            # stays reserved for dedicated/lab hardware.
+            RIPGREP_SHA="3fce3b5bb0236da2df6d99672afb8a719642eca7"
+            echo "==> shallow-cloning BurntSushi/ripgrep @ $RIPGREP_SHA into fixtures/ripgrep"
+            rm -rf fixtures/ripgrep
+            mkdir -p fixtures/ripgrep
+            (
+              cd fixtures/ripgrep
+              git init -q
+              git remote add origin https://github.com/BurntSushi/ripgrep.git
+              git fetch --depth 1 origin "$RIPGREP_SHA"
+              git checkout -q FETCH_HEAD
+            )
+          fi
+
           if grep -qw '04-large-file' <<< "$SCENARIOS_INPUT"; then
             echo "==> generating fixtures/large/100mb.log"
             mkdir -p fixtures/large
@@ -157,17 +286,29 @@ jobs:
             awk -v line="$LOG_LINE" 'BEGIN { for (i = 0; i < 750000; i++) print line " seq=" i }' > fixtures/large/100mb.log
           fi
 
+      - name: Collect memory pressure (before bench)
+        if: always()
+        run: |
+          mkdir -p ci-artifact
+          if command -v memory_pressure >/dev/null 2>&1; then
+            memory_pressure > ci-artifact/mem-pressure-before.txt 2>&1 || true
+          else
+            vm_stat > ci-artifact/mem-pressure-before.txt 2>&1 || true
+          fi
+
       - name: Run benchmark - channel A (${{ inputs.channel_a }})
         id: run_a
         if: always() && steps.resolve_apps.outputs.zed_a_app != ''
         env:
           ZED_A_APP: ${{ steps.resolve_apps.outputs.zed_a_app }}
           CHANNEL_A: ${{ inputs.channel_a }}
+          BUILD_LABEL_A: ${{ inputs.build_label_a }}
           RUNS: ${{ inputs.runs }}
           SOAK_SECONDS: ${{ inputs.soak_seconds }}
         run: |
           set +e
-          LABEL="ci-${CHANNEL_A}-${GITHUB_SHA:0:7}"
+          CHANNEL_LABEL="${BUILD_LABEL_A:-$CHANNEL_A}"
+          LABEL="ci-${CHANNEL_LABEL}-${GITHUB_SHA:0:7}"
           echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           zpb run --zed "$ZED_A_APP" --label "$LABEL" --all \
             --scenarios-dir ci-scenarios --runs "$RUNS" --soak-override "$SOAK_SECONDS"
@@ -178,15 +319,20 @@ jobs:
 
       - name: Run benchmark - channel B (${{ inputs.channel_b }})
         id: run_b
-        if: always() && inputs.channel_b != '' && steps.resolve_apps.outputs.zed_b_app != ''
+        if: >-
+          always() &&
+          (inputs.channel_b != '' || inputs.build_run_id_b != '') &&
+          steps.resolve_apps.outputs.zed_b_app != ''
         env:
           ZED_B_APP: ${{ steps.resolve_apps.outputs.zed_b_app }}
           CHANNEL_B: ${{ inputs.channel_b }}
+          BUILD_LABEL_B: ${{ inputs.build_label_b }}
           RUNS: ${{ inputs.runs }}
           SOAK_SECONDS: ${{ inputs.soak_seconds }}
         run: |
           set +e
-          LABEL="ci-${CHANNEL_B}-${GITHUB_SHA:0:7}"
+          CHANNEL_LABEL="${BUILD_LABEL_B:-$CHANNEL_B}"
+          LABEL="ci-${CHANNEL_LABEL}-${GITHUB_SHA:0:7}"
           echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           zpb run --zed "$ZED_B_APP" --label "$LABEL" --all \
             --scenarios-dir ci-scenarios --runs "$RUNS" --soak-override "$SOAK_SECONDS"
@@ -197,7 +343,7 @@ jobs:
 
       - name: Compare channel A vs channel B
         id: compare
-        if: always() && inputs.channel_b != ''
+        if: always() && (inputs.channel_b != '' || inputs.build_run_id_b != '')
         env:
           RESULTS_A: ${{ steps.run_a.outputs.results_dir }}
           RESULTS_B: ${{ steps.run_b.outputs.results_dir }}
@@ -211,6 +357,16 @@ jobs:
               | tee ci-artifact/compare-skipped.txt
           fi
           exit 0
+
+      - name: Collect memory pressure (after bench)
+        if: always()
+        run: |
+          mkdir -p ci-artifact
+          if command -v memory_pressure >/dev/null 2>&1; then
+            memory_pressure > ci-artifact/mem-pressure-after.txt 2>&1 || true
+          else
+            vm_stat > ci-artifact/mem-pressure-after.txt 2>&1 || true
+          fi
 
       - name: Collect host info
         if: always()

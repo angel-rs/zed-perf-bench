@@ -1,0 +1,11 @@
+name = "03b-ripgrep-rust"
+description = "Open the BurntSushi/ripgrep source tree. Same shape as 03-zed-rust — rust-analyzer indexing a Rust workspace — but on a project small enough (rust-analyzer footprint ~1-2GB) to fit a 7GB CI runner. 03-zed-rust's full zed-repo indexing stays reserved for dedicated/lab hardware."
+project_path = "ripgrep"
+zed_args = []
+
+[env]
+
+[phases]
+settle_seconds = 120
+soak_seconds = 0
+startup_timeout = 180

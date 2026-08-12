@@ -126,6 +126,115 @@ CI run's `timeout-minutes` budget without hand-editing the scenario
 TOML; it works the same way outside CI, for the same reason (a quick
 local leak-signal check without waiting the full 30 minutes).
 
+### Build-from-source + bench: two isolated workflows
+
+`.github/workflows/build.yml` builds a cargo package from source (Zed
+itself, by default) on its own `macos-14` runner and uploads the binary
+as an artifact. It's split out from `bench.yml` on purpose — divide and
+conquer: a from-source build can run long and fails in a completely
+different way (an OOM'd linker) than a benchmark run (a hung or
+crashing editor), so each gets its own job, its own timeout, and a
+build's worst case never eats into `bench.yml`'s tight 45-minute
+budget:
+
+```
+┌────────────────────┐     ┌────────────────────┐
+│ build.yml           │     │ build.yml           │
+│ label=A, timeout=180│     │ label=B, timeout=180│   dispatched
+│ (independent job,   │     │ (independent job,   │   separately,
+│  runs in parallel)  │     │  runs in parallel)  │   run in parallel
+└──────────┬───────────┘     └──────────┬───────────┘
+           │ artifact:                   │ artifact:
+           │ zed-build-A                 │ zed-build-B
+           └──────────────┬──────────────┘
+                           ▼
+                 ┌────────────────────┐
+                 │ bench.yml           │   timeout=45,
+                 │ downloads both      │   never builds
+                 │ artifacts, runs     │   from source
+                 │ scenarios, compares │   itself
+                 └────────────────────┘
+```
+
+`bench.yml`'s `channel_a`/`channel_b` (installed via brew) remain the
+default path. To bench two from-source builds against each other
+instead, dispatch `build.yml` twice, then feed both run ids into
+`bench.yml`'s `build_run_id_a`/`build_label_a` and
+`build_run_id_b`/`build_label_b` inputs:
+
+```sh
+# 1. Build channel A (e.g. upstream main) and channel B (e.g. a candidate
+#    branch/fork), in parallel — two independent dispatches.
+gh workflow run build.yml -f repo=zed-industries/zed -f ref=main \
+  -f label=upstream-main
+gh workflow run build.yml -f repo=your-fork/zed -f ref=my-perf-branch \
+  -f label=my-change
+
+# 2. Grab the run ids (newest first).
+gh run list --workflow=build.yml --limit 5
+
+# 3. Wait for both to finish (each up to timeout-minutes: 180).
+gh run watch <run-id-a>
+gh run watch <run-id-b>
+
+# 4. Feed both artifacts into bench.yml as channel A and channel B.
+gh workflow run bench.yml \
+  -f scenarios="03b-ripgrep-rust" \
+  -f runs="2" \
+  -f build_run_id_a="<run-id-a>" -f build_label_a="upstream-main" \
+  -f build_run_id_b="<run-id-b>" -f build_label_b="my-change"
+
+# 5. Pull the compare table down once it's done.
+gh run watch <bench-run-id>
+gh run download <bench-run-id>
+```
+
+`build_run_id_a`/`build_run_id_b` and `build_label_a`/`build_label_b`
+gate each other — setting one without the other fails the run early
+with a clear `::error::` rather than a confusing downstream artifact-not-
+found. When a `build_run_id_*` is set, its `build_label_*` also replaces
+the corresponding `channel_*` in the zpb result label
+(`ci-<build_label_a>-<sha>` instead of `ci-<channel_a>-<sha>`), so a
+from-source result is never mislabeled as a brew channel it never
+touched.
+
+**Fairness note.** `build.yml` pins the same build env
+(`CARGO_BUILD_JOBS=3`, `CARGO_PROFILE_RELEASE_DEBUG=0`,
+`CARGO_PROFILE_RELEASE_LTO=thin`, `CARGO_INCREMENTAL=0`) regardless of
+which `repo`/`ref` a given dispatch targets, so channel A and channel B
+in a from-source `bench.yml` comparison are always built identically —
+the numbers are internally comparable to each other. They are **not**
+comparable to an official Zed release build, whose build profile and
+code-signing differ from what this harness produces.
+
+**Gatekeeper note.** A `zed-build-*` artifact downloaded by `bench.yml`
+via `actions/download-artifact` runs fine inside CI — nothing in that
+path (`gh run download`, or the action itself) applies macOS's
+`com.apple.quarantine` attribute, which is only ever set on files that
+arrived through a browser or similar quarantine-aware download path. If
+you instead pull an artifact down locally to a Mac through a browser to
+poke at it by hand, macOS may quarantine it there; `xattr -d
+com.apple.quarantine <path>` or right-click → Open clears that. Not a
+concern for the CI-only round-trip this repo actually uses.
+
+**7GB RAM strategy.** Two independent levers keep this fitting a
+`macos-14` runner's 7GB:
+- **Build side** (`build.yml`): the pinned env above exists specifically
+  for this constraint. `CARGO_BUILD_JOBS=3` caps concurrent linker
+  invocations — the linker, not the compiler, is what actually OOMs a
+  memory-constrained build. `CARGO_PROFILE_RELEASE_DEBUG=0` and
+  `CARGO_PROFILE_RELEASE_LTO=thin` keep the linked binary (and thus
+  linker memory) smaller. `CARGO_INCREMENTAL=0` skips incremental-
+  compilation caching that only pays off across repeated local builds,
+  never a single from-scratch CI run.
+- **Bench side** (`bench.yml`): `03b-ripgrep-rust` exists for the same
+  reason `03-zed-rust` doesn't fit here — rust-analyzer indexing
+  ripgrep's much smaller workspace runs ~1-2GB, comfortably inside a
+  7GB runner, while still exercising the same rust-analyzer-indexing
+  code path. `03-zed-rust`'s full zed-repo indexing stays reserved for
+  dedicated/lab hardware with real headroom, per the run-conditions
+  checklist in BASELINE.md.
+
 ## Methodology
 
 The full design justification — a comparison matrix of the five industry
