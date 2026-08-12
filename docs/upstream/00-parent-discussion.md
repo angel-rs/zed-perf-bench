@@ -35,6 +35,12 @@ Each child PR will state "Part of this discussion" and link back here; this chec
 
 I built [zed-perf-bench](https://github.com/angel-rs/zed-perf-bench) — an external harness that launches a given Zed binary against pinned fixture projects and samples the full process tree (editor + language servers, tagged) at 1 Hz across standard scenarios: cold start, TypeScript monorepo (tsserver), Zed's own repo (rust-analyzer), a 100 MB file, and a long idle soak with linear-regression growth detection. It reports median-of-N with noise flags and produces before/after comparison tables. Every child PR will carry one of those tables, plus host specs. Methodology follows Firefox AWSY and Chromium memory-infra conventions: `phys_footprint` as the primary memory metric on macOS when available, a settled/quiesced checkpoint distinct from the whole-window median, and median + coefficient-of-variation with explicit noise flags rather than a single point estimate.
 
+**Proof runs** (all on public GitHub Actions, macos-14 arm64, reproducible from the repo):
+
+- [A/A null test](https://github.com/angel-rs/zed-perf-bench/actions/runs/31618916212) — upstream `main` built twice from source (two parallel 60-63 min builds on stock 7 GB runners) and benched against itself. Measured noise floor: ±0.2-1.8% RSS, ±0.8-4.4% phys_footprint across cold-start / rust-analyzer / 100 MB-file scenarios. Any delta inside that band is noise, and the harness says so.
+- [stable vs preview](https://github.com/angel-rs/zed-perf-bench/actions/runs/31616172830) — real-signal demo: Zed preview showed **+10.8% settled phys_footprint vs stable at cold start** (70.5 → 78.2 MB, CV ≤ 0.05, N=3; the main `zed` process alone +12.7%) — roughly 3× the measured noise floor, while the other scenarios stayed within it. That's the shape of report each child PR would carry.
+- Each run's compare table renders directly in the workflow's Summary tab, Limitations section auto-appended.
+
 If the team finds the harness useful beyond these PRs (e.g., as a seed for perf CI), I'm glad to adapt it or donate it — separate conversation, not a condition of any of this.
 
 ## How I'd like to work
