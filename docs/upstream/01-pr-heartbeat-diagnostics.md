@@ -14,8 +14,9 @@ Since #58999, Zed logs resident/virtual memory every 30s and flags significant j
 
 ## Change
 
-- Add `BufferStore::diagnostics()` returning summed counters across open buffers: buffer count, total retained `operations` entries, total `undo_stack` entries, largest single buffer's counts. Mirrors the shape of `WorktreeStoreDiagnostics` (`crates/project/src/worktree_store.rs`).
-- Log it from the existing significant-change branch in `start_memory_usage_logging` (`crates/zed/src/reliability.rs`), next to the worktree diagnostics.
+- Add `BufferStoreDiagnostics` and `BufferStore::diagnostics(&self, cx: &App)` (`crates/project/src/buffer_store.rs:35`, `:1028`), summing across open buffers: `buffer_count`, `total_operations`, `total_undo_entries`, and `largest_buffer_operations`. Mirrors the shape of `WorktreeStoreDiagnostics` (`crates/project/src/worktree_store.rs`).
+- Add `text::Buffer::operation_count()` and `undo_stack_len()` (`crates/text/src/text.rs:1352`, `:1356`), next to the existing `operations()` getter, since `History`'s `operations`/`undo_stack` fields had no public length accessors.
+- Add `log_buffer_store_diagnostics` (`crates/zed/src/reliability.rs:237`) and call it from the same significant-change branch as `log_worktree_diagnostics` (`:110`), same dedup-by-`entity_id`-and-aggregate shape, one `log::info!` line.
 
 Log-only: no behavior change, no new dependencies, no telemetry (log file only, same as the existing heartbeat).
 
