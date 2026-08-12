@@ -14,6 +14,12 @@ name: build
 # (see README "Running in CI"). A full Zed release build is real cost —
 # dispatch deliberately, manual dispatch only, never on push/PR.
 on:
+  # workflow_dispatch drives the GitHub web UI "Run workflow" button;
+  # workflow_call lets ab.yml invoke this as a reusable workflow (build-a/
+  # build-b jobs) so a single dispatch of ab.yml runs both builds and the
+  # bench that follows in one UI click. Inputs are mirrored 1:1 between the
+  # two triggers on purpose, so behavior is identical whichever way this
+  # workflow is invoked.
   workflow_dispatch:
     inputs:
       repo:
@@ -43,6 +49,37 @@ on:
           Defaults to cargo_package when left blank.
         type: string
         default: ""
+  workflow_call:
+    inputs:
+      repo:
+        description: "GitHub repo to build, as owner/name"
+        type: string
+        default: "zed-industries/zed"
+      ref:
+        description: "Branch or commit SHA to build"
+        type: string
+        required: true
+      label:
+        description: >-
+          Label for this build. Used in the artifact/build-log names
+          (zed-build-<label>, build-log-<label>) and as the channel
+          label bench.yml expects when consuming this artifact, e.g.
+          "upstream-main" or "pr1-candidate".
+        type: string
+        required: true
+      cargo_package:
+        description: "Cargo package to build (cargo build --package <this>)"
+        type: string
+        default: "zed"
+      binary_name:
+        description: >-
+          Binary produced by cargo_package, if it differs from the
+          package name (e.g. cargo_package=ripgrep produces binary rg).
+          Defaults to cargo_package when left blank.
+        type: string
+        default: ""
+
+run-name: build ${{ inputs.label }} (${{ inputs.repo }}@${{ inputs.ref }})
 
 # No process may outlive the job on a per-minute-billed runner.
 jobs:

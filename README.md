@@ -52,12 +52,78 @@ exactly what a baseline run does, phase by phase, and
 
 ## Running in CI (GitHub Actions)
 
-`.github/workflows/bench.yml` runs the harness on a GitHub-hosted macOS
-arm64 runner (`macos-14`) instead of a laptop — useful for a run you want
-kicked off from anywhere, or one you don't want tying up your own
-machine. It's `workflow_dispatch`-only (never on push/PR).
+The primary way to run this is GitHub's own web UI — no local checkout,
+no `gh` CLI, no terminal: **Actions tab → pick a workflow (`ab`, `bench`,
+or `build`) → "Run workflow" → fill in the dropdown/text inputs → green
+button.** Every input that has a fixed set of sane values (Zed channel,
+rep count, scenario set) is a `type: choice` dropdown, so there's nothing
+to typo. Once it's running, the run page's **Summary** tab shows the
+result — a compare table (A vs B) or the single-channel metrics table —
+without downloading anything; the raw JSON/logs are still there as a
+downloadable artifact if you need them.
 
-Dispatch it with the `gh` CLI:
+The `gh` CLI remains a fully-supported alternative for scripting a
+dispatch or watching one from a terminal — every example below has both.
+All three workflows are `workflow_dispatch`-only (never on push/PR).
+
+### One-click A/B from source (`ab.yml`, recommended)
+
+`.github/workflows/ab.yml` is the orchestrator: one dispatch builds
+**both** sides from source in parallel and benches them against each
+other, with zero run-id copy-pasting. This is what most A/B questions
+("does my branch make things worse?") actually want, and it's the UI
+path this whole rewrite exists for.
+
+**UI walkthrough:** Actions → `ab` → Run workflow → set `repo_b`/`ref_b`
+to your candidate branch (`repo_a`/`ref_a` default to
+`zed-industries/zed@main`), pick `scenarios` and `runs` from the
+dropdowns → Run workflow. Three jobs appear (`build-a`, `build-b` running
+in parallel, then `bench`); when `bench` finishes, its Summary tab has
+the compare table.
+
+**`gh` CLI equivalent:**
+
+```sh
+gh workflow run ab.yml \
+  -f ref_b="my-perf-branch" \
+  -f label_b="my-change" \
+  -f scenarios="01-cold-start-empty 03b-ripgrep-rust" \
+  -f runs="2"
+
+gh run watch                     # follow build-a, build-b, then bench
+gh run list --workflow=ab.yml --limit 1 --json url --jq '.[0].url'
+```
+
+Under the hood, `build.yml` and `bench.yml` both declare `on:
+workflow_call` alongside their `workflow_dispatch` trigger, so `ab.yml`
+invokes them directly (`uses: ./.github/workflows/build.yml`) as
+reusable workflows instead of dispatching-and-polling. Because
+`workflow_call`'d jobs execute inside the *caller's* run, `build-a`,
+`build-b`, and `bench` all share one `github.run_id` — which is exactly
+what lets `bench`'s `build_label_a`/`build_label_b` inputs resolve their
+artifacts from **the current run** (see `bench.yml`'s
+`build_run_id_*`/`build_label_*` inputs below) instead of a separate
+`build.yml` run id ever needing to be passed around. `ab.yml` itself has
+no `workflow_call` trigger — it's the top-level entry point, not
+something that gets called by anything else.
+
+**Billing note:** this is two from-source Zed builds plus a bench run in
+one dispatch — see the billing section on `build.yml` below. Dispatch it
+deliberately.
+
+### `bench.yml` — single build or brew channels
+
+Prefer `ab.yml` for a from-source A vs. B comparison; reach for
+`bench.yml` directly when you want a single-channel run, a brew-channel
+comparison (`stable` vs. `preview`), or you're re-benching an artifact
+from a `build.yml` run you already have sitting around.
+
+**UI walkthrough:** Actions → `bench` → Run workflow → pick `channel_a`
+from the dropdown and type a `channel_b` (or leave both `build_label_a`/
+`build_label_b` set instead, to bench a from-source artifact) → Run
+workflow → read the Summary tab when it's done.
+
+**`gh` CLI equivalent:**
 
 ```sh
 gh workflow run bench.yml \
@@ -69,18 +135,26 @@ gh workflow run bench.yml \
 ```
 
 - `scenarios` — space- or comma-separated scenario names (default
-  `01-cold-start-empty`). `03-zed-rust` triggers a pinned shallow clone
-  of `zed-industries/zed` into `fixtures/zed`; `04-large-file` triggers
-  local generation of `fixtures/large/100mb.log`. `02-vscode-ts` is not
-  wired up in CI (no cheap fixture path for it yet).
-- `runs` — reps per scenario, passed straight to `zpb run --runs`.
+  `01-cold-start-empty`). Valid names: `01-cold-start-empty`,
+  `03-zed-rust`, `03b-ripgrep-rust`, `04-large-file`, `05-idle-soak`.
+  `03-zed-rust` triggers a pinned shallow clone of `zed-industries/zed`
+  into `fixtures/zed`; `04-large-file` triggers local generation of
+  `fixtures/large/100mb.log`. `02-vscode-ts` is not wired up in CI (no
+  cheap fixture path for it yet).
+- `runs` — reps per scenario (choice: 1/2/3 in the UI), passed straight
+  to `zpb run --runs`.
 - `soak_seconds` — passed as `--soak-override` (see below); only takes
   effect if a selected scenario already has `soak_seconds > 0` (today,
   only `05-idle-soak`, whose TOML default is 1800s).
-- `channel_a` / `channel_b` — Zed channels to benchmark. `channel_b`
-  empty (the default) means a single-channel run with no compare;
-  `channel_b="preview"` installs `zed@preview` alongside `zed` (stable)
-  and runs both, followed by `zpb compare`.
+- `channel_a` — Zed channel for the first run (choice: `stable`/`preview`
+  in the UI).
+- `channel_b` — Zed channel for the second run. Plain text, not a
+  dropdown — its most common value is `""` (GitHub Actions requires
+  `type: choice` options to be non-empty strings, so it can't be one of
+  the dropdown's own choices). Empty (the default) means a
+  single-channel run with no compare; `channel_b="preview"` installs
+  `zed@preview` alongside `zed` (stable) and runs both, followed by `zpb
+  compare`.
 
 Watch it and pull the results down once it's done:
 
@@ -88,6 +162,15 @@ Watch it and pull the results down once it's done:
 gh run watch                     # or: gh run list --workflow=bench.yml
 gh run download <run-id>         # artifact: bench-results-<run-id>/
 ```
+
+**Results without downloading anything.** Every `bench.yml` run writes
+its results to the run's **Summary** tab (`$GITHUB_STEP_SUMMARY`,
+`if: always()`): the `compare.md` table when both channels ran, or the
+single channel's `run-summary.txt` plus a key-metrics table (per
+scenario: startup time, `rss_settle_mb`, `footprint_settled_mb`, all
+medians) parsed straight out of the result JSONs with `jq`. The
+downloadable artifact below still exists for the raw JSON and logs — the
+Summary tab is for the "did this help, yes or no" answer at a glance.
 
 The artifact contains the raw `results/` JSON, a `compare.md` if both
 channels ran, `host-info.txt` (CPU model, macOS version, memory), and
@@ -127,6 +210,12 @@ TOML; it works the same way outside CI, for the same reason (a quick
 local leak-signal check without waiting the full 30 minutes).
 
 ### Build-from-source + bench: two isolated workflows
+
+`ab.yml` (above) automates the whole flow below into one dispatch. Reach
+for the manual version here when you want asymmetric control — e.g.
+build once with `build.yml` and bench it against several different
+`scenarios`/`runs` combinations without rebuilding, or bench a
+`build.yml` run that's already sitting around from an earlier dispatch.
 
 `.github/workflows/build.yml` builds a cargo package from source (Zed
 itself, by default) on its own `macos-14` runner and uploads the binary
@@ -189,14 +278,18 @@ gh run watch <bench-run-id>
 gh run download <bench-run-id>
 ```
 
-`build_run_id_a`/`build_run_id_b` and `build_label_a`/`build_label_b`
-gate each other — setting one without the other fails the run early
-with a clear `::error::` rather than a confusing downstream artifact-not-
-found. When a `build_run_id_*` is set, its `build_label_*` also replaces
-the corresponding `channel_*` in the zpb result label
-(`ci-<build_label_a>-<sha>` instead of `ci-<channel_a>-<sha>`), so a
-from-source result is never mislabeled as a brew channel it never
-touched.
+A `build_run_id_*` set without its matching `build_label_*` fails the run
+early with a clear `::error::` rather than a confusing downstream
+artifact-not-found — an artifact name (`zed-build-<label>`) can't be
+resolved from a run id alone. The reverse — `build_label_*` set with
+`build_run_id_*` left empty — is valid on purpose: it pulls
+`zed-build-<label>` from the **current** run instead of a separate
+`build.yml` run, which is exactly the mode `ab.yml`'s `bench` job uses
+(steps 1-4 above collapse into that one case). Either way, once a
+`build_label_*` is set, it also replaces the corresponding `channel_*` in
+the zpb result label (`ci-<build_label_a>-<sha>` instead of
+`ci-<channel_a>-<sha>`), so a from-source result is never mislabeled as a
+brew channel it never touched.
 
 **Fairness note.** `build.yml` pins the same build env
 (`CARGO_BUILD_JOBS=3`, `CARGO_PROFILE_RELEASE_DEBUG=0`,

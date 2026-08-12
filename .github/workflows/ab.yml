@@ -1,0 +1,110 @@
+name: ab
+
+# One-click A/B-from-source orchestrator: dispatch this ONE workflow and it
+# builds both sides (build-a, build-b — parallel, each its own build.yml
+# run via workflow_call) and then benches them against each other (bench,
+# via workflow_call), all inside a single GitHub Actions run. No copying
+# run ids between dispatches by hand — build-a/build-b/bench all share one
+# `github.run_id` because workflow_call'd jobs execute inside the caller's
+# run, which is exactly what lets `bench`'s build_label_a/build_label_b
+# (with empty build_run_id_a/build_run_id_b) resolve via bench.yml's
+# current-run artifact-download mode instead of a separate run id.
+#
+# BILLING AWARENESS: this repo is private, and private-repo macOS runner
+# minutes bill at a 10x multiplier against the included Actions minutes
+# (see README "Running in CI"). One dispatch here is TWO from-source Zed
+# builds plus a bench run — real cost, and the two builds run in parallel
+# so this can burn double the per-minute rate for as long as the slower
+# build takes. Dispatch deliberately, manual dispatch only, never on
+# push/PR.
+on:
+  workflow_dispatch:
+    inputs:
+      repo_a:
+        description: "Channel A: GitHub repo to build, as owner/name"
+        type: string
+        default: "zed-industries/zed"
+      ref_a:
+        description: "Channel A: branch or commit SHA to build"
+        type: string
+        default: "main"
+      label_a:
+        description: >-
+          Channel A label — artifact is zed-build-<this>, and it's what
+          shows up as channel A in the bench result label and compare.md.
+        type: string
+        default: "upstream-main"
+      repo_b:
+        description: "Channel B: GitHub repo to build, as owner/name"
+        type: string
+        default: "angel-rs/zed"
+      ref_b:
+        description: "Channel B: branch or commit SHA to build (your candidate)"
+        type: string
+        required: true
+      label_b:
+        description: >-
+          Channel B label — artifact is zed-build-<this>, and it's what
+          shows up as channel B in the bench result label and compare.md.
+        type: string
+        default: "candidate"
+      scenarios:
+        description: "Scenario set to run in the bench step"
+        type: choice
+        options:
+          - "01-cold-start-empty"
+          - "01-cold-start-empty 03b-ripgrep-rust"
+          - "01-cold-start-empty 03b-ripgrep-rust 04-large-file"
+          - "05-idle-soak"
+        default: "01-cold-start-empty 03b-ripgrep-rust"
+      runs:
+        description: "Repetitions per scenario (zpb run --runs)"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+        default: "2"
+      soak_seconds:
+        description: >-
+          --soak-override value for 05-idle-soak, if it's in `scenarios`.
+          No effect otherwise.
+        type: string
+        default: "600"
+
+run-name: A/B ${{ inputs.label_a }} vs ${{ inputs.label_b }}
+
+jobs:
+  build-a:
+    name: Build A (${{ inputs.label_a }})
+    uses: ./.github/workflows/build.yml
+    with:
+      repo: ${{ inputs.repo_a }}
+      ref: ${{ inputs.ref_a }}
+      label: ${{ inputs.label_a }}
+
+  build-b:
+    name: Build B (${{ inputs.label_b }})
+    uses: ./.github/workflows/build.yml
+    with:
+      repo: ${{ inputs.repo_b }}
+      ref: ${{ inputs.ref_b }}
+      label: ${{ inputs.label_b }}
+
+  bench:
+    name: Bench A vs B
+    needs: [build-a, build-b]
+    uses: ./.github/workflows/bench.yml
+    with:
+      scenarios: ${{ inputs.scenarios }}
+      runs: ${{ inputs.runs }}
+      soak_seconds: ${{ inputs.soak_seconds }}
+      # Empty — both channels come from the from-source builds above, not
+      # brew. build_label_a/build_label_b with no build_run_id_a/
+      # build_run_id_b is bench.yml's current-run artifact mode: it
+      # downloads zed-build-<label> from THIS run (the one build-a/
+      # build-b just uploaded into) instead of a separate build.yml run.
+      channel_a: ""
+      channel_b: ""
+      build_label_a: ${{ inputs.label_a }}
+      build_label_b: ${{ inputs.label_b }}

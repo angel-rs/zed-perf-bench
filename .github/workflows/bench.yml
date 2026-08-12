@@ -10,12 +10,111 @@ name: bench
 # matrix, workflow_dispatch only (never on push/PR), and a hard
 # timeout-minutes cap so a hung Zed process can't run the clock out.
 on:
+  # workflow_dispatch drives the GitHub web UI "Run workflow" button;
+  # workflow_call lets ab.yml invoke this as a reusable workflow (the
+  # `bench` job) so the one-click A/B orchestrator can hand it
+  # build_label_a/build_label_b with empty run ids and get the
+  # current-run artifact-download mode below. workflow_call inputs can't
+  # use `type: choice` (GitHub Actions restriction), so channel_a/
+  # channel_b/runs fall back to plain strings on that trigger — same
+  # defaults, same values accepted, just no dropdown when invoked as a
+  # reusable workflow instead of a direct dispatch.
   workflow_dispatch:
     inputs:
       scenarios:
         description: >-
           Space- or comma-separated scenario names to run, e.g.
-          "01-cold-start-empty" or "01-cold-start-empty 04-large-file".
+          "01-cold-start-empty" or "01-cold-start-empty 03b-ripgrep-rust".
+          Valid names: 01-cold-start-empty, 03-zed-rust, 03b-ripgrep-rust,
+          04-large-file, 05-idle-soak. 02-vscode-ts is not wired up in CI
+          (no cheap fixture path for it yet).
+        type: string
+        default: "01-cold-start-empty"
+      runs:
+        description: "Repetitions per scenario (zpb run --runs)"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+        default: "2"
+      soak_seconds:
+        description: >-
+          --soak-override value: overrides soak_seconds for any selected
+          scenario that already has soak>0 (currently only
+          05-idle-soak). No effect if 05-idle-soak isn't in `scenarios`.
+        type: string
+        default: "600"
+      channel_a:
+        description: "Zed channel for the first (or only) run"
+        type: choice
+        options:
+          - "stable"
+          - "preview"
+        default: "stable"
+      channel_b:
+        description: >-
+          Zed channel for the second run, compared against channel_a.
+          Valid values: "" (empty — single-channel run, no compare,
+          this is the default), "preview", or "stable". Not a
+          `type: choice` dropdown like channel_a: GitHub Actions
+          requires every choice option to be a non-empty string, and ""
+          is the most common value here. Ignored for resolving a binary
+          when build_run_id_b or build_label_b is set (still used to
+          gate whether a B run happens at all if you don't want to set
+          it to a real channel name).
+        type: string
+        default: ""
+      build_run_id_a:
+        description: >-
+          Optional: run id of a build.yml dispatch whose zed-build-<label>
+          artifact should be used as channel A instead of installing from
+          brew. Requires build_label_a to also be set. Leave empty (with
+          build_label_a set) to instead pull the artifact from THIS
+          workflow run — the mode ab.yml's orchestrator uses.
+        type: string
+        default: ""
+      build_run_id_b:
+        description: >-
+          Optional: run id of a build.yml dispatch whose zed-build-<label>
+          artifact should be used as channel B instead of installing from
+          brew. Requires build_label_b to also be set. Leave empty (with
+          build_label_b set) to instead pull the artifact from THIS
+          workflow run. Setting build_label_b alone (with channel_b
+          empty) is enough to trigger a B run.
+        type: string
+        default: ""
+      build_label_a:
+        description: >-
+          label used when dispatching build.yml for channel A — the
+          artifact is named zed-build-<this>. Set alone (build_run_id_a
+          empty), it downloads that artifact from the CURRENT run
+          instead of a separate build.yml run; set together with
+          build_run_id_a, it downloads from that specific run. Also used
+          in place of channel_a in the zpb result label
+          (ci-<build_label_a>-<sha>) when set.
+        type: string
+        default: ""
+      build_label_b:
+        description: >-
+          label used when dispatching build.yml for channel B — the
+          artifact is named zed-build-<this>. Set alone (build_run_id_b
+          empty), it downloads that artifact from the CURRENT run
+          instead of a separate build.yml run; set together with
+          build_run_id_b, it downloads from that specific run. Also used
+          in place of channel_b in the zpb result label
+          (ci-<build_label_b>-<sha>) when set.
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      scenarios:
+        description: >-
+          Space- or comma-separated scenario names to run, e.g.
+          "01-cold-start-empty" or "01-cold-start-empty 03b-ripgrep-rust".
+          Valid names: 01-cold-start-empty, 03-zed-rust, 03b-ripgrep-rust,
+          04-large-file, 05-idle-soak. 02-vscode-ts is not wired up in CI
+          (no cheap fixture path for it yet).
         type: string
         default: "01-cold-start-empty"
       runs:
@@ -38,42 +137,56 @@ on:
           Zed channel for the second run, compared against channel_a.
           Empty = single-channel run, no compare. Only "preview" is
           wired to a brew cask today besides empty. Ignored for
-          resolving a binary when build_run_id_b is set (still used to
-          gate whether a B run happens at all if you don't want to set
-          it to a real channel name).
+          resolving a binary when build_run_id_b or build_label_b is
+          set (still used to gate whether a B run happens at all if you
+          don't want to set it to a real channel name).
         type: string
         default: ""
       build_run_id_a:
         description: >-
           Optional: run id of a build.yml dispatch whose zed-build-<label>
           artifact should be used as channel A instead of installing from
-          brew. Requires build_label_a to also be set.
+          brew. Requires build_label_a to also be set. Leave empty (with
+          build_label_a set) to instead pull the artifact from THIS
+          workflow run — the mode ab.yml's orchestrator uses.
         type: string
         default: ""
       build_run_id_b:
         description: >-
           Optional: run id of a build.yml dispatch whose zed-build-<label>
           artifact should be used as channel B instead of installing from
-          brew. Requires build_label_b to also be set. Setting this alone
-          (with channel_b empty) is enough to trigger a B run.
+          brew. Requires build_label_b to also be set. Leave empty (with
+          build_label_b set) to instead pull the artifact from THIS
+          workflow run. Setting build_label_b alone (with channel_b
+          empty) is enough to trigger a B run.
         type: string
         default: ""
       build_label_a:
         description: >-
           label used when dispatching build.yml for channel A — the
-          artifact is named zed-build-<this>. Required together with
-          build_run_id_a; also used in place of channel_a in the zpb
-          result label (ci-<build_label_a>-<sha>) when set.
+          artifact is named zed-build-<this>. Set alone (build_run_id_a
+          empty), it downloads that artifact from the CURRENT run
+          instead of a separate build.yml run; set together with
+          build_run_id_a, it downloads from that specific run. Also used
+          in place of channel_a in the zpb result label
+          (ci-<build_label_a>-<sha>) when set.
         type: string
         default: ""
       build_label_b:
         description: >-
           label used when dispatching build.yml for channel B — the
-          artifact is named zed-build-<this>. Required together with
-          build_run_id_b; also used in place of channel_b in the zpb
-          result label (ci-<build_label_b>-<sha>) when set.
+          artifact is named zed-build-<this>. Set alone (build_run_id_b
+          empty), it downloads that artifact from the CURRENT run
+          instead of a separate build.yml run; set together with
+          build_run_id_b, it downloads from that specific run. Also used
+          in place of channel_b in the zpb result label
+          (ci-<build_label_b>-<sha>) when set.
         type: string
         default: ""
+
+run-name: >-
+  bench ${{ inputs.channel_a }}${{ inputs.build_label_a }} vs
+  ${{ inputs.channel_b }}${{ inputs.build_label_b }} — ${{ inputs.scenarios }}
 
 # No process may outlive the job; a runaway Zed process eating the clock
 # is exactly the failure mode a hard cap protects against on a
@@ -99,20 +212,20 @@ jobs:
           BUILD_LABEL_B: ${{ inputs.build_label_b }}
         run: |
           set -euo pipefail
+          # A run_id with no label can never resolve an artifact name
+          # (zed-build-<label>) — always an error. A label with no run_id
+          # is now a valid mode: pull zed-build-<label> from THIS run
+          # instead of a separate build.yml dispatch — see "Download
+          # build artifact A/B (current run)" below. This is what lets
+          # ab.yml's build-a/build-b + bench jobs (sharing one run id via
+          # workflow_call) feed straight into bench without ever passing
+          # a run id around.
           if [ -n "$BUILD_RUN_ID_A" ] && [ -z "$BUILD_LABEL_A" ]; then
             echo "::error::build_run_id_a is set but build_label_a is empty — both or neither"
             exit 1
           fi
-          if [ -z "$BUILD_RUN_ID_A" ] && [ -n "$BUILD_LABEL_A" ]; then
-            echo "::error::build_label_a is set but build_run_id_a is empty — both or neither"
-            exit 1
-          fi
           if [ -n "$BUILD_RUN_ID_B" ] && [ -z "$BUILD_LABEL_B" ]; then
             echo "::error::build_run_id_b is set but build_label_b is empty — both or neither"
-            exit 1
-          fi
-          if [ -z "$BUILD_RUN_ID_B" ] && [ -n "$BUILD_LABEL_B" ]; then
-            echo "::error::build_label_b is set but build_run_id_b is empty — both or neither"
             exit 1
           fi
           echo "==> build input guard passed"
@@ -151,14 +264,23 @@ jobs:
           ls ci-scenarios
 
       - name: Install Zed (stable)
-        if: inputs.build_run_id_a == ''
+        if: inputs.build_run_id_a == '' && inputs.build_label_a == ''
         run: brew install --cask zed
 
       - name: Install Zed (preview)
-        if: inputs.channel_b == 'preview' && inputs.build_run_id_b == ''
+        if: >-
+          inputs.channel_b == 'preview' && inputs.build_run_id_b == '' &&
+          inputs.build_label_b == ''
         run: brew install --cask zed@preview
 
-      - name: Download build artifact A
+      - name: Download build artifact A (current run)
+        if: inputs.build_label_a != '' && inputs.build_run_id_a == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-build-${{ inputs.build_label_a }}
+          path: build-a
+
+      - name: Download build artifact A (explicit run)
         if: inputs.build_run_id_a != ''
         uses: actions/download-artifact@v4
         with:
@@ -167,7 +289,14 @@ jobs:
           github-token: ${{ github.token }}
           path: build-a
 
-      - name: Download build artifact B
+      - name: Download build artifact B (current run)
+        if: inputs.build_label_b != '' && inputs.build_run_id_b == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-build-${{ inputs.build_label_b }}
+          path: build-b
+
+      - name: Download build artifact B (explicit run)
         if: inputs.build_run_id_b != ''
         uses: actions/download-artifact@v4
         with:
@@ -187,7 +316,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -n "$BUILD_RUN_ID_A" ]; then
+          if [ -n "$BUILD_LABEL_A" ]; then
             ZED_A_BIN=$(find build-a -maxdepth 1 -type f ! -name 'build-info.txt' | head -n1)
             if [ -z "$ZED_A_BIN" ]; then
               echo "::error::no binary found in build-a/ (artifact zed-build-${BUILD_LABEL_A})"
@@ -196,7 +325,11 @@ jobs:
             fi
             chmod +x "$ZED_A_BIN"
             echo "zed_a_app=$ZED_A_BIN" >> "$GITHUB_OUTPUT"
-            echo "==> channel_a binary (build run ${BUILD_RUN_ID_A}, label ${BUILD_LABEL_A}): $ZED_A_BIN"
+            if [ -n "$BUILD_RUN_ID_A" ]; then
+              echo "==> channel_a binary (build run ${BUILD_RUN_ID_A}, label ${BUILD_LABEL_A}): $ZED_A_BIN"
+            else
+              echo "==> channel_a binary (current run, label ${BUILD_LABEL_A}): $ZED_A_BIN"
+            fi
           else
             ZED_A_APP=$(find /Applications -maxdepth 1 -iname "Zed.app" | head -n1)
             if [ -z "$ZED_A_APP" ]; then
@@ -208,8 +341,8 @@ jobs:
             echo "==> channel_a app: $ZED_A_APP"
           fi
 
-          if [ "$CHANNEL_B" = "preview" ] || [ -n "$BUILD_RUN_ID_B" ]; then
-            if [ -n "$BUILD_RUN_ID_B" ]; then
+          if [ "$CHANNEL_B" = "preview" ] || [ -n "$BUILD_LABEL_B" ]; then
+            if [ -n "$BUILD_LABEL_B" ]; then
               ZED_B_BIN=$(find build-b -maxdepth 1 -type f ! -name 'build-info.txt' | head -n1)
               if [ -z "$ZED_B_BIN" ]; then
                 echo "::error::no binary found in build-b/ (artifact zed-build-${BUILD_LABEL_B})"
@@ -218,7 +351,11 @@ jobs:
               fi
               chmod +x "$ZED_B_BIN"
               echo "zed_b_app=$ZED_B_BIN" >> "$GITHUB_OUTPUT"
-              echo "==> channel_b binary (build run ${BUILD_RUN_ID_B}, label ${BUILD_LABEL_B}): $ZED_B_BIN"
+              if [ -n "$BUILD_RUN_ID_B" ]; then
+                echo "==> channel_b binary (build run ${BUILD_RUN_ID_B}, label ${BUILD_LABEL_B}): $ZED_B_BIN"
+              else
+                echo "==> channel_b binary (current run, label ${BUILD_LABEL_B}): $ZED_B_BIN"
+              fi
             else
               ZED_B_APP=$(find /Applications -maxdepth 1 -iname "*Preview*.app" | head -n1)
               if [ -z "$ZED_B_APP" ]; then
@@ -321,7 +458,7 @@ jobs:
         id: run_b
         if: >-
           always() &&
-          (inputs.channel_b != '' || inputs.build_run_id_b != '') &&
+          (inputs.channel_b != '' || inputs.build_run_id_b != '' || inputs.build_label_b != '') &&
           steps.resolve_apps.outputs.zed_b_app != ''
         env:
           ZED_B_APP: ${{ steps.resolve_apps.outputs.zed_b_app }}
@@ -343,7 +480,9 @@ jobs:
 
       - name: Compare channel A vs channel B
         id: compare
-        if: always() && (inputs.channel_b != '' || inputs.build_run_id_b != '')
+        if: >-
+          always() &&
+          (inputs.channel_b != '' || inputs.build_run_id_b != '' || inputs.build_label_b != '')
         env:
           RESULTS_A: ${{ steps.run_a.outputs.results_dir }}
           RESULTS_B: ${{ steps.run_b.outputs.results_dir }}
@@ -411,6 +550,53 @@ jobs:
             echo "channel_b=${{ inputs.channel_b }} exit_code=${{ steps.run_b.outputs.exit_code }} results_dir=$RESULTS_B"
           } > ci-artifact/run-summary.txt
           cat ci-artifact/run-summary.txt
+
+      - name: Write step summary
+        # Puts results on the run page itself — via GITHUB_STEP_SUMMARY —
+        # so a UI-driven dispatch never has to download the artifact just
+        # to see whether A beat B. if: always() so a mid-run failure still
+        # leaves whatever partial signal (run-summary.txt, a single
+        # channel's metrics) exists instead of a blank summary tab.
+        if: always()
+        env:
+          RESULTS_A: ${{ steps.run_a.outputs.results_dir }}
+          RESULTS_B: ${{ steps.run_b.outputs.results_dir }}
+        run: |
+          set +e
+          {
+            echo "## zed-perf-bench results"
+            echo
+            if [ -f ci-artifact/compare.md ]; then
+              cat ci-artifact/compare.md
+            else
+              echo "### Run summary"
+              echo
+              echo '```'
+              cat ci-artifact/run-summary.txt 2>/dev/null || echo "run-summary.txt missing"
+              echo '```'
+              echo
+              RESULTS_DIR="${RESULTS_A:-$RESULTS_B}"
+              if [ -n "$RESULTS_DIR" ] && [ -d "$RESULTS_DIR" ]; then
+                echo "### Key metrics ($(basename "$RESULTS_DIR"))"
+                echo
+                echo "| scenario | startup_s (median) | rss_settle_mb (median) | footprint_settled_mb (median) |"
+                echo "|---|---|---|---|"
+                for f in "$RESULTS_DIR"/*.json; do
+                  [ -f "$f" ] || continue
+                  jq -r '
+                    def fmt(v): if v == null then "n/a" else ((v * 10 | round) / 10 | tostring) end;
+                    "| " + .scenario
+                      + " | " + fmt(.aggregate.startup_seconds.median)
+                      + " | " + fmt(.aggregate.rss_settle_mb.median)
+                      + " | " + fmt(.aggregate.footprint_settled_mb.median)
+                      + " |"
+                  ' "$f"
+                done
+              else
+                echo "_no results directory found — see run-summary.txt above and the uploaded artifact for diagnostics._"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifact
         if: always()
