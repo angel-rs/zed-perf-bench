@@ -131,6 +131,24 @@ jobs:
             git checkout -q FETCH_HEAD
           )
 
+      - name: Select newest Xcode on the runner
+        run: |
+          set -euo pipefail
+          # The macos-14 image defaults to Xcode 15.4 (SDK 14.5), whose
+          # libc++ headers fail to compile Zed's livekit/cxx C++ FFI
+          # (undefined-template errors in pointer_traits). Zed's docs
+          # assume a current Xcode, so pick the newest one installed on
+          # the image and pin it for every later step via DEVELOPER_DIR.
+          NEWEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$NEWEST" ]; then
+            echo "::error::no versioned Xcode installs found under /Applications"
+            ls /Applications | grep -i xcode || true
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$NEWEST/Contents/Developer" >> "$GITHUB_ENV"
+          echo "==> selected: $NEWEST"
+          DEVELOPER_DIR="$NEWEST/Contents/Developer" xcodebuild -version
+
       - name: Rust toolchain
         run: |
           set -euo pipefail
